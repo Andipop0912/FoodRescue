@@ -1,0 +1,203 @@
+# FoodRescue NiFi Ingestion Data Contract
+# Version: 1.0
+# Integration boundary: POST /ingest/batch (FastAPI)
+# NiFi flow: GetFile → ValidateCSVHeader → InvokeHTTP → RouteOnResponse
+
+schema_version: "1.0"
+
+endpoint:
+  method: POST
+  path: /ingest/batch
+  content_type: multipart/form-data
+  auth: Bearer <JWT token for admin or donor account>
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Donation record fields
+# ─────────────────────────────────────────────────────────────────────────────
+donation_record:
+  record_type:
+    type: string
+    required: false
+    default: "donation"
+    allowed_values: ["donation", "surplus", ""]
+    notes: Omit or set to "donation" for all donation records.
+
+  org_name:
+    type: string
+    required: true
+    max_length: 255
+    notes: Name of the donating organization. Used as a stable donor identifier.
+
+  food_type:
+    type: string
+    required: true
+    max_length: 255
+    example: "Chicken Biryani"
+
+  category:
+    type: string
+    required: true
+    allowed_values:
+      - cooked_meals
+      - bakery
+      - produce
+      - dairy
+      - packaged
+      - beverages
+    aliases:
+      - "Veg Meals" → cooked_meals
+      - "BREAD" → bakery
+      - "Fresh Produce" → produce
+      - "Milk" → dairy
+      - "Dry Goods" → packaged
+      - "Juice" → beverages
+    notes: >
+      Case-insensitive. Common aliases are normalised automatically.
+      Unknown categories are rejected and written to the rejected_rows table.
+
+  quantity_kg:
+    type: float
+    required: true
+    min: 0.001
+    max: 5000.0
+
+  expiry_time:
+    type: datetime
+    required: true
+    formats:
+      - "YYYY-MM-DDTHH:MM:SS"       # ISO 8601 preferred
+      - "YYYY-MM-DD HH:MM:SS"
+      - "DD/MM/YYYY HH:MM"
+      - "DD-MM-YYYY HH:MM"
+    timezone: UTC (naive datetime assumed UTC)
+    constraints:
+      - must be at least 60 minutes in the future (short shelf-life rejection)
+
+  area:
+    type: string
+    required: true
+    allowed_values:
+      - Nerul
+      - Vashi
+      - Belapur
+      - Kharghar
+      - Sanpada
+      - Airoli
+      - Seawoods
+    notes: Used to impute lat/lng if coordinates are not provided.
+
+  lat:
+    type: float
+    required: false
+    notes: WGS-84 latitude. Imputed from area centroid if omitted.
+
+  lng:
+    type: float
+    required: false
+    notes: WGS-84 longitude. Imputed from area centroid if omitted.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NGO request record fields
+# ─────────────────────────────────────────────────────────────────────────────
+request_record:
+  record_type:
+    type: string
+    required: true
+    allowed_values: ["request", "need", "ngo_request"]
+
+  org_name:
+    type: string
+    required: true
+    notes: Name of the NGO making the request.
+
+  category:
+    type: string
+    required: false
+    notes: Null/empty means "any category".
+
+  quantity_kg:
+    type: float
+    required: true
+    min: 0.001
+    max: 5000.0
+
+  expiry_time:
+    type: datetime
+    required: true
+    notes: >
+      For requests this is the "needed_by" deadline.
+      Must not be in the past.
+
+  area:
+    type: string
+    required: true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Batch metadata (CSV / multipart)
+# ─────────────────────────────────────────────────────────────────────────────
+batch:
+  format: CSV (RFC 4180) or JSON array
+  header_row: required for CSV
+  max_rows: 5000
+  encoding: UTF-8
+  source_field: >
+    Passed as form field `source` (string, e.g. "nifi-inbox").
+    Used as provenance label in IngestBatch and Event tables.
+  filename_field: >
+    Passed as form field `filename` (original filename).
+    Stored in IngestBatch for traceability.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Idempotency
+# ─────────────────────────────────────────────────────────────────────────────
+idempotency:
+  key_fields: [org_name, food_type, area, expiry_time, quantity_kg]
+  mechanism: >
+    The ingestion service computes a SHA-256 dedupe_key from the normalized
+    key fields and rejects any row whose key already exists in the donations
+    table.  Retrying an identical CSV file is safe: duplicates are rejected
+    with reason "duplicate of an existing record" and are visible in
+    GET /ingest/rejected.
+  batch_retry_safety: >
+    Full batch retries are safe.  Duplicate rows are counted in rejected_rows
+    but do not appear in PostgreSQL as new Donation rows.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Error handling
+# ─────────────────────────────────────────────────────────────────────────────
+errors:
+  validation_errors:
+    http_status: 200 (partial success — see rejected_rows in response body)
+    storage: rejected_rows table in PostgreSQL
+    api: GET /ingest/rejected?batch_id=<id>
+  authentication_error:
+    http_status: 401
+  authorization_error:
+    http_status: 403
+  payload_error:
+    http_status: 422
+  server_error:
+    http_status: 500
+    nifi_action: Route to failure path → PutFile /data/nifi-failed/
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NiFi-specific notes
+# ─────────────────────────────────────────────────────────────────────────────
+nifi:
+  source_directory: /data/inbox
+  file_pattern: ".*\\.csv$"
+  failure_directory: /data/nifi-failed
+  parameter_context: foodrescue-params
+  parameters:
+    - name: backend.url
+      value: "http://backend:8000"
+      sensitive: false
+    - name: ingest.source
+      value: "nifi-inbox"
+      sensitive: false
+    - name: auth.token
+      description: >
+        Admin JWT token for /ingest/batch.  Set via NiFi Parameter Context
+        (sensitive=true) or injected via environment variable.  NEVER hardcode
+        in the flow definition or version-controlled files.
+      sensitive: true

@@ -5,5 +5,9 @@ __pycache__/
 node_modules/
 dist/
 data/inbox/*.csv
+# Delta Lake analytical tables (generated data; not source code)
+data/delta/
+# NiFi failed-file landing zone (runtime artifacts)
+data/nifi-failed/
 screenshots/
 .venv/

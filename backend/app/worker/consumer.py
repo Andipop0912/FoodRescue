@@ -4,31 +4,47 @@ Also sweeps (every 30 s) for donations that were never matched, e.g. when the br
 down at ingest time or a new NGO need appeared, giving the pipeline a best-effort
 self-healing path.
 
+Queue topology (Phase 1 — reliable event processing)
+-----------------------------------------------------
+Main queue  : donation.created  (durable, x-dead-letter-exchange=donation.dlx)
+DL exchange : donation.dlx      (direct, durable)
+DL queue    : donation.dead     (durable, bound to donation.dlx / donation.created)
+
 ACK / NACK strategy
 -------------------
-* On success  : basic_ack  — message is removed from the queue.
-* On failure  : basic_nack(requeue=False) — message is discarded from the queue.
+* On success          : basic_ack  — message removed from donation.created.
+* On processing fail  : basic_nack(requeue=False) — message routed to donation.dead
+  via the dead-letter exchange.  The DLQ preserves the original payload for manual
+  inspection or replay.
+* On malformed body   : basic_nack(requeue=False) — malformed messages cannot be
+  retried by the sweeper (no donation_id), so they go directly to the DLQ.
 
-  No dead-letter queue (DLQ) is configured; discarding on failure is the safest
-  compatible behaviour for the current topology and prevents infinite requeue loops.
+Recovery path
+-------------
+The 30-second sweeper queries the database directly for donations whose
+match_attempts < MAX_ATTEMPTS and status = S_LISTED, providing bounded, logged
+retries independent of the queue state.
 
-  The AMQP message payload is permanently gone after a NACK.  Recovery relies on the
-  30-second sweeper querying the database directly for donations whose match_attempts
-  column is below MAX_ATTEMPTS and whose status is still S_LISTED.
+Delivery-guarantee contract
+----------------------------
+This implementation provides *at-least-once* delivery with *bounded retries*.
+It does NOT provide exactly-once delivery:
+- A consumer crash after processing but before ACK may cause reprocessing.
+- match_donation() uses SELECT FOR UPDATE and checks match_attempts to make
+  repeated processing safe (idempotent at the match layer).
 
-Known limitations of the sweeper-based recovery
-------------------------------------------------
-* NOT GUARANTEED: recovery depends on the donation row remaining in S_LISTED status
-  and match_attempts < MAX_ATTEMPTS.  A donation that somehow reaches S_MATCHED before
-  the transaction rolls back (only possible in extreme edge cases) will not be re-queried.
-* HARD CUTOFF: once match_attempts reaches MAX_ATTEMPTS (4), the sweeper permanently
-  stops attempting matches for that donation.
-* BROKER DEPENDENCY: the sweeper runs inside the consumer event loop; if RabbitMQ is
-  unreachable, the worker's AMQP reconnect backoff suspends sweeper execution entirely.
+Known limitations
+-----------------
+* The DLQ provides observability but not automatic replay.
+* Sweeper retries stop after MAX_ATTEMPTS (4) per donation.
+* If the donation.created queue was previously declared without x-dead-letter-exchange,
+  you must delete and redeclare it (or use a new queue name) in production.
+* Sweeper is suspended while the AMQP reconnect loop is active (broker down).
 """
 import json
 import logging
 import time
+from datetime import timedelta
 
 import pika
 from sqlalchemy import select
@@ -39,7 +55,6 @@ from app.constants import QUEUE_DONATION_CREATED, S_LISTED
 from app.models import Donation
 from app.services.matching import match_donation
 from app.utils import utcnow
-from datetime import timedelta
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s worker: %(message)s")
 logging.getLogger("pika").setLevel(logging.WARNING)
@@ -48,10 +63,56 @@ log = logging.getLogger("worker")
 SWEEP_EVERY_S = 30
 MAX_ATTEMPTS = 4
 
+# Dead-letter topology constants
+QUEUE_DLX = "donation.dlx"
+QUEUE_DEAD = "donation.dead"
+
+
+def _declare_topology(ch: pika.adapters.blocking_connection.BlockingChannel) -> None:
+    """Declare all queues, exchanges, and bindings for the reliable pipeline.
+
+    Must be called before consuming.  Safe to call on every reconnect because all
+    declarations are idempotent when arguments match.
+
+    WARNING: If donation.created was previously declared without
+    x-dead-letter-exchange, RabbitMQ will raise PRECONDITION_FAILED (406).
+    In that case, delete the queue in the management UI and let this function
+    recreate it.
+    """
+    ch.exchange_declare(exchange=QUEUE_DLX, exchange_type="direct", durable=True)
+    ch.queue_declare(queue=QUEUE_DEAD, durable=True)
+    ch.queue_bind(queue=QUEUE_DEAD, exchange=QUEUE_DLX, routing_key=QUEUE_DONATION_CREATED)
+    ch.queue_declare(
+        queue=QUEUE_DONATION_CREATED,
+        durable=True,
+        arguments={"x-dead-letter-exchange": QUEUE_DLX},
+    )
+
+
+def _parse_message(body: bytes) -> dict:
+    """Parse and validate a message body.
+
+    Raises ValueError for malformed JSON or missing required fields so the caller
+    can NACK the message to the DLQ rather than retrying indefinitely.
+    """
+    try:
+        msg = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError(f"malformed message body (not valid JSON): {body[:200]!r}") from exc
+    if not isinstance(msg, dict):
+        raise ValueError(f"message must be a JSON object, got {type(msg).__name__}")
+    if "donation_id" not in msg:
+        raise ValueError(f"message missing required field 'donation_id': {msg}")
+    return msg
+
 
 def process_message(body: bytes) -> int:
-    """Handle one donation.created payload. Returns number of matches saved."""
-    msg = json.loads(body)
+    """Handle one donation.created payload. Returns number of matches saved.
+
+    Raises ValueError for malformed bodies and any exception from match_donation
+    on processing failures.  The caller is responsible for ACK/NACK.
+    """
+    msg = _parse_message(body)
     with dbmod.SessionLocal() as db:
         return len(match_donation(db, int(msg["donation_id"])))
 
@@ -84,9 +145,9 @@ def run() -> None:
         try:
             conn = pika.BlockingConnection(pika.URLParameters(settings.rabbitmq_url))
             ch = conn.channel()
-            ch.queue_declare(queue=QUEUE_DONATION_CREATED, durable=True)
+            _declare_topology(ch)
             ch.basic_qos(prefetch_count=20)
-            log.info("connected; waiting for %s", QUEUE_DONATION_CREATED)
+            log.info("connected; waiting for %s (DLQ: %s)", QUEUE_DONATION_CREATED, QUEUE_DEAD)
             last_sweep = time.time()
             for method, _props, body in ch.consume(QUEUE_DONATION_CREATED, inactivity_timeout=5):
                 if method is not None:
@@ -95,12 +156,10 @@ def run() -> None:
                         log.info("matched donation -> %d matches", n)
                         ch.basic_ack(method.delivery_tag)
                     except Exception:
-                        # NACK without requeue: discard the message from the queue.
-                        # The sweeper retries via match_attempts < MAX_ATTEMPTS so there
-                        # is no silent loss — just bounded, logged retries.
+                        # NACK without requeue: message is routed to donation.dead via
+                        # the dead-letter exchange for manual inspection or replay.
                         log.exception(
-                            "failed to process message; nacking without requeue "
-                            "(sweeper will retry up to MAX_ATTEMPTS times)"
+                            "failed to process message; nacking to DLQ %s", QUEUE_DEAD
                         )
                         ch.basic_nack(method.delivery_tag, requeue=False)
                 if time.time() - last_sweep > SWEEP_EVERY_S:

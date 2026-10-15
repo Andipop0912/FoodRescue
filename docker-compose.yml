@@ -94,11 +94,48 @@ services:
     depends_on:
       backend: {condition: service_healthy}
 
-  # ---- Not built yet ----
-  # nifi:          profile [pipeline, all]  - watches ./data/inbox, posts to backend /ingest/batch
+  # ---- Pipeline services (profile: pipeline or all) ----
+
+  nifi:
+    image: apache/nifi:1.28.1
+    profiles: [pipeline, all]
+    # Single-user auth is required since NiFi 1.14.  Override NIFI_PASSWORD in .env for
+    # any shared environment; never use the default in production.
+    environment:
+      SINGLE_USER_CREDENTIALS_USERNAME: ${NIFI_USER:-admin}
+      SINGLE_USER_CREDENTIALS_PASSWORD: ${NIFI_PASSWORD:-nifi-local-dev-password-change-me}
+      NIFI_WEB_HTTP_PORT: "8080"
+      NIFI_WEB_HTTPS_PORT: ""          # Disable HTTPS for local dev; re-enable for production.
+      NIFI_JVM_HEAP_INIT: 512m
+      NIFI_JVM_HEAP_MAX: 1g
+    ports:
+      - "${NIFI_PORT:-8080}:8080"
+    volumes:
+      - nifi_state:/opt/nifi/nifi-current/state
+      - nifi_db:/opt/nifi/nifi-current/database_repository
+      - nifi_flowfile:/opt/nifi/nifi-current/flowfile_repository
+      - nifi_content:/opt/nifi/nifi-current/content_repository
+      - nifi_provenance:/opt/nifi/nifi-current/provenance_repository
+      - ./data/inbox:/data/inbox:ro       # NiFi reads CSVs from here (GetFile source)
+      - ./data/nifi-failed:/data/nifi-failed  # Failed files land here
+      - ./nifi:/nifi-config:ro            # Version-controlled flow config / scripts
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/nifi/ > /dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 15
+      start_period: 120s
+    depends_on:
+      backend: {condition: service_healthy}
+
   # airflow:       profile [pipeline, all]  - DAGs: delta snapshots, analytics refresh
   # elasticsearch: profile [search, all]    - donation/NGO search index
 
 volumes:
   pgdata:
   mongodata:
+  nifi_state:
+  nifi_db:
+  nifi_flowfile:
+  nifi_content:
+  nifi_provenance:

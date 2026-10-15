@@ -146,4 +146,23 @@ def ingest_rows(db: Session, rows: list[dict], *, source: str, filename: str | N
             mongo.get_mongo().events.insert_many([dict(m) for m in msgs])
     except Exception as exc:
         log.warning("MongoDB event payload write failed: %s", exc)
+
+    # 5) DELTA LAKE: append accepted donations to the analytical store (non-fatal).
+    if donations:
+        try:
+            from app.services.delta import upsert_donations
+            delta_records = [
+                {"donation_id": d.id, "batch_id": batch.id, "food_type": d.food_type,
+                 "category": d.category, "quantity_kg": d.quantity_kg, "area": d.area,
+                 "lat": d.lat, "lng": d.lng, "status": d.status, "expiry_time": d.expiry_time,
+                 "created_at": d.created_at, "source": source, "dedupe_key": d.dedupe_key,
+                 "ingest_batch_id": batch.id}
+                for d in donations
+            ]
+            upsert_donations(delta_records)
+            log.info("delta: upserted %d donations from batch %s", len(delta_records), batch.id)
+        except Exception as exc:
+            # Delta Lake failures must never block operational PostgreSQL writes.
+            log.warning("Delta Lake write failed (non-fatal): %s", exc)
+
     return summary
