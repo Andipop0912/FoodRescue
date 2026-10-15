@@ -71,3 +71,40 @@ def test_websocket_requires_admin_token(client, donor, admin):
     with client.websocket_connect(f"/ws/live?token={admin_token}") as ws:
         data = ws.receive_json()
         assert "stats" in data and "demo" in data
+
+
+# ---------------------------------------------------------------------------
+# JWT secret startup validator
+# ---------------------------------------------------------------------------
+
+def test_jwt_secret_validator_rejects_short_secret_in_production(monkeypatch):
+    """A secret shorter than 32 bytes must raise ValueError in production mode."""
+    import os
+    from pydantic import ValidationError
+    from app.config import Settings
+    monkeypatch.setenv("FOODRESCUE_ENV", "production")
+    with pytest.raises((ValidationError, ValueError)):
+        Settings(jwt_secret="tooshort", database_url="postgresql+psycopg2://u:p@prod-host/db")
+
+
+def test_jwt_secret_validator_rejects_dev_placeholder_in_production(monkeypatch):
+    """The known dev placeholder must raise ValueError in production mode."""
+    from pydantic import ValidationError
+    from app.config import Settings, _DEV_SECRET
+    monkeypatch.setenv("FOODRESCUE_ENV", "production")
+    with pytest.raises((ValidationError, ValueError)):
+        Settings(jwt_secret=_DEV_SECRET, database_url="postgresql+psycopg2://u:p@prod-host/db")
+
+
+def test_jwt_secret_validator_allows_dev_placeholder_locally():
+    """The dev placeholder is accepted when the database URL contains 'localhost'."""
+    from app.config import Settings, _DEV_SECRET
+    s = Settings(jwt_secret=_DEV_SECRET, database_url="postgresql+psycopg2://u:p@localhost/db")
+    assert s.jwt_secret == _DEV_SECRET
+
+
+def test_jwt_secret_validator_falls_back_to_dev_secret_when_empty_locally():
+    """An empty jwt_secret on localhost must silently default to the dev placeholder."""
+    from app.config import Settings, _DEV_SECRET
+    s = Settings(jwt_secret="", database_url="postgresql+psycopg2://u:p@localhost/db")
+    assert s.jwt_secret == _DEV_SECRET

@@ -105,9 +105,17 @@ def _open_candidates(db: Session, now: datetime) -> list[Candidate]:
 
 
 def match_donation(db: Session, donation_id: int, now: datetime | None = None, log: bool = True) -> list[Match]:
-    """Compute and persist the top-5 matches for a donation (idempotent: replaces old suggestions)."""
+    """Compute and persist the top-5 matches for a donation (idempotent: replaces old suggestions).
+
+    Concurrency: the Donation row is locked via SELECT FOR UPDATE so that two worker
+    processes racing on the same donation_id cannot both run the matching pipeline
+    simultaneously and produce duplicate Match rows.  PostgreSQL honours the lock;
+    SQLite (used by the test suite) silently ignores it.
+    """
     now = now or utcnow()
-    donation = db.get(Donation, donation_id)
+    # Lock the row for the duration of this transaction so concurrent workers wait
+    # rather than racing to insert duplicate suggestions.
+    donation = db.scalar(select(Donation).where(Donation.id == donation_id).with_for_update())
     if donation is None or donation.status not in (S_LISTED, S_MATCHED):
         return []
     donation.match_attempts += 1

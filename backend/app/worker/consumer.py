@@ -2,6 +2,17 @@
 
 Also sweeps (every 30 s) for donations that never got matched, e.g. when the broker was down at
 ingest time or a new NGO need appeared, so the pipeline self-heals.
+
+ACK / NACK strategy
+-------------------
+* On success  : basic_ack  — message is removed from the queue.
+* On failure  : basic_nack(requeue=False) — message is discarded from the queue.
+  Rationale: the 30-second sweeper re-attempts any donation whose match_attempts < MAX_ATTEMPTS,
+  so failed messages are safely retried without risk of an infinite requeue loop.
+  No dead-letter queue is configured; discarding on failure is the safest compatible behaviour
+  with the current topology.  The Donation.match_attempts column is the authoritative retry
+  counter, giving at most MAX_ATTEMPTS sweeper attempts before the donation is left for manual
+  review.
 """
 import json
 import logging
@@ -58,9 +69,16 @@ def run() -> None:
                     try:
                         n = process_message(body)
                         log.info("matched donation -> %d matches", n)
+                        ch.basic_ack(method.delivery_tag)
                     except Exception:
-                        log.exception("failed to process message; sweeper will retry")
-                    ch.basic_ack(method.delivery_tag)
+                        # NACK without requeue: discard the message from the queue.
+                        # The sweeper retries via match_attempts < MAX_ATTEMPTS so there
+                        # is no silent loss — just bounded, logged retries.
+                        log.exception(
+                            "failed to process message; nacking without requeue "
+                            "(sweeper will retry up to MAX_ATTEMPTS times)"
+                        )
+                        ch.basic_nack(method.delivery_tag, requeue=False)
                 if time.time() - last_sweep > SWEEP_EVERY_S:
                     last_sweep = time.time()
                     try:
