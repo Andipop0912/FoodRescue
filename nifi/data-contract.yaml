@@ -1,18 +1,53 @@
 # FoodRescue NiFi Ingestion Data Contract
-# Version: 1.0
+# Version: 1.1
 # Integration boundary: POST /ingest/batch (FastAPI)
-# NiFi flow: GetFile → ValidateCSVHeader → InvokeHTTP → RouteOnResponse
+# NiFi flow: GetFile → UpdateAttribute → InvokeHTTP → PutFile (failure path)
 
-schema_version: "1.0"
+schema_version: "1.1"
 
+# ─────────────────────────────────────────────────────────────────────────────
+# HTTP request contract
+# ─────────────────────────────────────────────────────────────────────────────
 endpoint:
   method: POST
   path: /ingest/batch
-  content_type: multipart/form-data
-  auth: Bearer <JWT token for admin or donor account>
+  content_type: text/csv
+  auth: Bearer <JWT token — set via --auth-token / FOODRESCUE_AUTH_TOKEN; never hardcoded>
+
+request_headers:
+  Authorization:
+    required: true
+    format: "Bearer <JWT>"
+    notes: >
+      Admin JWT token.  Passed as a dynamic property on InvokeHTTP so it is
+      sent as an HTTP request header.  Never stored in version-controlled files.
+
+  X-Ingest-Source:
+    required: false
+    default: "nifi-inbox"
+    allowed_values: ["nifi-inbox", "upload", "api", "sim"]
+    notes: >
+      Set by UpdateAttribute from the hardcoded value "nifi-inbox".
+      Forwarded to the backend as an HTTP header via InvokeHTTP "Attributes to Send"
+      regex (X-Ingest-.*).  Stored in IngestBatch.source for traceability.
+      Values outside the allowed set are silently mapped to "api" by the backend.
+
+  X-Ingest-Filename:
+    required: false
+    notes: >
+      Set by UpdateAttribute as "${filename}" (NiFi FlowFile attribute).
+      Contains the original filename from GetFile (e.g. "batch_2026-10-15.csv").
+      Forwarded to the backend via the same "Attributes to Send" regex.
+      Stored in IngestBatch.filename for traceability.
+
+request_body:
+  format: CSV (RFC 4180)
+  encoding: UTF-8 (BOM-stripped by backend)
+  header_row: required
+  max_rows: 5000
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Donation record fields
+# Donation record fields (record_type = donation | surplus | "")
 # ─────────────────────────────────────────────────────────────────────────────
 donation_record:
   record_type:
@@ -97,7 +132,7 @@ donation_record:
     notes: WGS-84 longitude. Imputed from area centroid if omitted.
 
 # ─────────────────────────────────────────────────────────────────────────────
-# NGO request record fields
+# NGO request record fields (record_type = request | need | ngo_request)
 # ─────────────────────────────────────────────────────────────────────────────
 request_record:
   record_type:
@@ -133,21 +168,6 @@ request_record:
     required: true
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Batch metadata (CSV / multipart)
-# ─────────────────────────────────────────────────────────────────────────────
-batch:
-  format: CSV (RFC 4180) or JSON array
-  header_row: required for CSV
-  max_rows: 5000
-  encoding: UTF-8
-  source_field: >
-    Passed as form field `source` (string, e.g. "nifi-inbox").
-    Used as provenance label in IngestBatch and Event tables.
-  filename_field: >
-    Passed as form field `filename` (original filename).
-    Stored in IngestBatch for traceability.
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Idempotency
 # ─────────────────────────────────────────────────────────────────────────────
 idempotency:
@@ -170,24 +190,78 @@ errors:
     http_status: 200 (partial success — see rejected_rows in response body)
     storage: rejected_rows table in PostgreSQL
     api: GET /ingest/rejected?batch_id=<id>
+    nifi_action: >
+      200 response → InvokeHTTP routes to "Response" (auto-terminated).
+      Individual row rejections are NOT surfaced as HTTP errors — the batch
+      is accepted with rejected_rows > 0.  Inspect via GET /ingest/rejected.
+
   authentication_error:
     http_status: 401
+    nifi_action: No Retry → PutFile /data/nifi-failed (4xx = no retry)
+
   authorization_error:
     http_status: 403
+    nifi_action: No Retry → PutFile /data/nifi-failed (4xx = no retry)
+
   payload_error:
     http_status: 422
+    nifi_action: No Retry → PutFile /data/nifi-failed (4xx = no retry)
+
   server_error:
     http_status: 500
-    nifi_action: Route to failure path → PutFile /data/nifi-failed/
+    nifi_action: Retry → PutFile /data/nifi-failed
+    notes: >
+      5xx responses are routed via the "Retry" relationship to PutFile.
+      They are NOT auto-terminated — the original CSV is preserved in
+      /data/nifi-failed for manual inspection and replay.
+
+  connection_failure:
+    nifi_action: Failure → PutFile /data/nifi-failed
+    notes: >
+      Connection refused, timeout, or SSL errors go to the "Failure"
+      relationship → PutFile.  The original CSV is preserved.
 
 # ─────────────────────────────────────────────────────────────────────────────
-# NiFi-specific notes
+# NiFi flow configuration
 # ─────────────────────────────────────────────────────────────────────────────
 nifi:
   source_directory: /data/inbox
-  file_pattern: ".*\\.csv$"
+  inbox_mount: ./data/inbox:/data/inbox:rw   # rw required for GetFile (Keep Source File=false)
+  file_pattern: "[^\\.].*\\.csv"
   failure_directory: /data/nifi-failed
-  parameter_context: foodrescue-params
+  keep_source_file: false    # Consumed (deleted) after successful GetFile
+
+  processors:
+    GetFile:
+      scheduling_period: "10 sec"
+      keep_source_file: "false"
+
+    UpdateAttribute:
+      properties:
+        X-Ingest-Source: "nifi-inbox"
+        X-Ingest-Filename: "${filename}"
+
+    InvokeHTTP:
+      request_content_type: "text/csv"
+      send_message_body: "true"
+      attributes_to_send: "X-Ingest-.*"
+      authorization: "Bearer <auth_token>"    # dynamic property → Authorization header
+      connection_timeout: "30 sec"
+      read_timeout: "60 sec"
+      relationships:
+        Response: auto-terminate      # 2xx response body
+        Original: auto-terminate      # original FlowFile on success
+        Failure: PutFile              # connection/timeout errors
+        No Retry: PutFile             # 4xx errors
+        Retry: PutFile                # 5xx errors — MUST NOT be auto-terminated
+
+    PutFile:
+      directory: /data/nifi-failed
+      conflict_resolution: replace
+      relationships:
+        success: auto-terminate
+        failure: auto-terminate
+
   parameters:
     - name: backend.url
       value: "http://backend:8000"
@@ -197,7 +271,7 @@ nifi:
       sensitive: false
     - name: auth.token
       description: >
-        Admin JWT token for /ingest/batch.  Set via NiFi Parameter Context
-        (sensitive=true) or injected via environment variable.  NEVER hardcode
-        in the flow definition or version-controlled files.
+        Admin JWT token for /ingest/batch.  Pass via --auth-token CLI arg or
+        FOODRESCUE_AUTH_TOKEN env var.  NEVER hardcode in flow definitions or
+        version-controlled files.
       sensitive: true

@@ -31,7 +31,11 @@ async def _read_rows(request: Request) -> tuple[list[dict], str, str | None]:
         return list(csv.DictReader(io.StringIO(text))), "upload", name
     body = (await request.body()).decode("utf-8-sig")
     if "csv" in ctype:
-        return list(csv.DictReader(io.StringIO(body))), "api", None
+        _ALLOWED_SOURCES = {"sim", "api", "upload", "nifi-inbox"}
+        raw_source = request.headers.get("x-ingest-source", "api")
+        source = raw_source if raw_source in _ALLOWED_SOURCES else "api"
+        filename = request.headers.get("x-ingest-filename") or None
+        return list(csv.DictReader(io.StringIO(body))), source, filename
     try:
         payload = json.loads(body)
     except json.JSONDecodeError:
@@ -55,7 +59,7 @@ async def ingest_batch(request: Request, user: User = Depends(require_roles(ROLE
         raise HTTPException(422, "No rows supplied")
     if len(rows) > MAX_ROWS:
         raise HTTPException(413, f"Too many rows (max {MAX_ROWS})")
-    if source not in ("sim", "api", "upload"):
+    if source not in ("sim", "api", "upload", "nifi-inbox"):
         source = "api"
     if user.role == ROLE_DONOR:
         donor = donor_profile(db, user)

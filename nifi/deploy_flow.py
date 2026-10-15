@@ -1,20 +1,34 @@
 #!/usr/bin/env python3
 """Bootstrap the FoodRescue NiFi ingestion flow via the NiFi REST API.
 
-This script creates (or verifies) the following topology in NiFi:
+This script creates the following topology in NiFi:
 
   [GetFile /data/inbox]
-        │  FlowFile (CSV file content + attributes)
+        │  FlowFile (raw CSV content)
         ▼
-  [UpdateAttribute]  — adds batch metadata (source, filename, content-type)
+  [UpdateAttribute]  — adds X-Ingest-Source, X-Ingest-Filename
         │
         ▼
-  [InvokeHTTP]  POST http://backend:8000/ingest/batch
+  [InvokeHTTP]  POST http://backend:8000/ingest/batch  (Content-Type: text/csv)
         │                                  │
-        ▼ (Response.Status=2xx)            ▼ (Response.Status=4xx/5xx or timeout)
-  [LogAttribute success]           [PutFile /data/nifi-failed]
-        │
-        ▼ (auto-terminate)
+        ▼ (Response — 2xx body)            │
+   auto-terminate                          │
+        │                                  ├── Failure (connection/timeout)
+        ▼ (Original — auto-terminate)      ├── No Retry (4xx)
+                                           └── Retry (5xx)
+                                                    │
+                                                    ▼
+                                         [PutFile /data/nifi-failed]
+
+Request contract
+----------------
+POST /ingest/batch
+Content-Type: text/csv
+Authorization: Bearer <admin JWT>
+X-Ingest-Source: nifi-inbox       (set by UpdateAttribute → sent as HTTP header)
+X-Ingest-Filename: <filename>     (set by UpdateAttribute → sent as HTTP header)
+
+Body: raw CSV text (UTF-8, RFC 4180, header row required)
 
 Usage
 -----
@@ -32,10 +46,6 @@ Usage
       --backend-url http://backend:8000 \\
       --auth-token <ADMIN_JWT>
 
-Requirements
-------------
-  pip install requests
-
 Secrets
 -------
 Pass --auth-token via environment variable or a secrets manager.
@@ -43,6 +53,12 @@ Never commit real tokens to version control.
 
   export FOODRESCUE_AUTH_TOKEN=$(cat /run/secrets/nifi_auth_token)
   python nifi/deploy_flow.py ... --auth-token "$FOODRESCUE_AUTH_TOKEN"
+
+Preflight guard
+---------------
+If a process group named "FoodRescue Inbox Ingestion" already exists in the
+root process group, this script exits with a clear message rather than creating
+a duplicate.
 
 Live integration status
 -----------------------
@@ -106,8 +122,54 @@ def wait_for_nifi(nifi_url: str, retries: int = 20, delay: float = 10.0) -> None
 
 
 # ---------------------------------------------------------------------------
+# Preflight guard
+# ---------------------------------------------------------------------------
+
+FLOW_GROUP_NAME = "FoodRescue Inbox Ingestion"
+
+
+def _preflight_check(nifi_url: str, token: str, root_id: str) -> None:
+    """Abort if a process group with the expected name already exists.
+
+    This prevents duplicate flows being created on repeated script runs.
+    If a group exists, print instructions for manual inspection and exit.
+    """
+    try:
+        resp = _api(nifi_url, f"/nifi-api/process-groups/{root_id}/process-groups", token=token)
+    except RuntimeError as exc:
+        print(f"WARNING: could not list existing process groups: {exc}")
+        print("Proceeding anyway — check the NiFi UI for duplicates after deployment.")
+        return
+
+    existing = [
+        pg["component"]["name"]
+        for pg in resp.get("processGroups", [])
+        if pg.get("component", {}).get("name") == FLOW_GROUP_NAME
+    ]
+    if existing:
+        print(
+            f"\nERROR: A process group named '{FLOW_GROUP_NAME}' already exists in NiFi.\n"
+            "\nThis script will NOT create a duplicate. To redeploy:\n"
+            "  1. Open the NiFi UI and stop all processors in that group.\n"
+            "  2. Delete the process group manually.\n"
+            "  3. Re-run this script.\n"
+            "\nTo inspect the existing group via the API:\n"
+            f"  GET {nifi_url}/nifi-api/flow/process-groups/{root_id}\n"
+        )
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
 # Flow builder
 # ---------------------------------------------------------------------------
+
+def _require_id(obj: dict, label: str) -> str:
+    """Extract the 'id' field from a NiFi API response, raising on failure."""
+    obj_id = obj.get("id")
+    if not obj_id:
+        raise RuntimeError(f"NiFi did not return an id for {label}; response: {obj}")
+    return obj_id
+
 
 def build_flow(nifi_url: str, token: str, backend_url: str, auth_token: str,
                source: str = "nifi-inbox",
@@ -120,16 +182,22 @@ def build_flow(nifi_url: str, token: str, backend_url: str, auth_token: str,
     root_id = root_pg["processGroupFlow"]["id"]
     print(f"Root process group: {root_id}")
 
-    # 2. Create a named process group for isolation.
+    # 2. Preflight: abort if the flow already exists.
+    _preflight_check(nifi_url, token, root_id)
+
+    # 3. Create a named process group for isolation.
     pg = _api(nifi_url, f"/nifi-api/process-groups/{root_id}/process-groups",
               method="POST", token=token,
               body={"revision": {"version": 0},
-                    "component": {"name": "FoodRescue Inbox Ingestion",
+                    "component": {"name": FLOW_GROUP_NAME,
                                   "position": {"x": 0.0, "y": 0.0}}})
-    pg_id = pg["id"]
+    pg_id = _require_id(pg, "process group")
     print(f"Created process group: {pg_id}")
 
-    # 3. GetFile processor — reads CSVs from /data/inbox.
+    # 4. GetFile processor — reads CSVs from /data/inbox.
+    #    Keep Source File=false so successfully retrieved files are consumed
+    #    (deleted from /data/inbox) rather than reprocessed on every poll.
+    #    The inbox mount must be rw (not ro) for this to work.
     get_file = _api(nifi_url, f"/nifi-api/process-groups/{pg_id}/processors",
                     method="POST", token=token,
                     body={"revision": {"version": 0},
@@ -147,10 +215,12 @@ def build_flow(nifi_url: str, token: str, backend_url: str, auth_token: str,
                                   "schedulingStrategy": "TIMER_DRIVEN",
                                   "schedulingPeriod": "10 sec",
                               }}})
-    get_file_id = get_file["id"]
+    get_file_id = _require_id(get_file, "GetFile processor")
     print(f"  GetFile processor: {get_file_id}")
 
-    # 4. UpdateAttribute — attach batch metadata.
+    # 5. UpdateAttribute — attach X-Ingest-Source and X-Ingest-Filename.
+    #    These FlowFile attributes are sent as HTTP request headers by InvokeHTTP
+    #    when "Attributes to Send" regex matches their names.
     update_attr = _api(nifi_url, f"/nifi-api/process-groups/{pg_id}/processors",
                        method="POST", token=token,
                        body={"revision": {"version": 0},
@@ -160,13 +230,27 @@ def build_flow(nifi_url: str, token: str, backend_url: str, auth_token: str,
                                  "position": {"x": 0.0, "y": 200.0},
                                  "config": {
                                      "properties": {
-                                         "ingest.source": source,
-                                         "ingest.filename": "${filename}",
+                                         "X-Ingest-Source": source,
+                                         "X-Ingest-Filename": "${filename}",
                                      }}}})
-    update_attr_id = update_attr["id"]
+    update_attr_id = _require_id(update_attr, "UpdateAttribute processor")
     print(f"  UpdateAttribute processor: {update_attr_id}")
 
-    # 5. InvokeHTTP — POST to /ingest/batch.
+    # 6. InvokeHTTP — POST raw CSV to /ingest/batch.
+    #    - Content-Type: text/csv  (backend _read_rows handles raw CSV bodies)
+    #    - Authorization is set as a dynamic property (sent as an HTTP header in NiFi 1.x)
+    #    - Attributes to Send: regex matches X-Ingest-Source and X-Ingest-Filename
+    #      FlowFile attributes → they are forwarded as HTTP request headers
+    #
+    #    Relationship routing (NiFi 1.28.1):
+    #      Response   — 2xx response body FlowFile         → auto-terminate
+    #      Original   — original FlowFile on success       → auto-terminate
+    #      Failure    — connection/timeout errors           → PutFile (failure dir)
+    #      No Retry   — 4xx responses (client error)        → PutFile (failure dir)
+    #      Retry      — 5xx responses (server error)        → PutFile (failure dir)
+    #
+    #    NOTE: Retry must NOT be auto-terminated — that would silently discard
+    #    server-side failures.  We route it to PutFile for manual inspection.
     invoke_http = _api(nifi_url, f"/nifi-api/process-groups/{pg_id}/processors",
                        method="POST", token=token,
                        body={"revision": {"version": 0},
@@ -178,21 +262,28 @@ def build_flow(nifi_url: str, token: str, backend_url: str, auth_token: str,
                                      "properties": {
                                          "Remote URL": f"{backend_url}/ingest/batch",
                                          "HTTP Method": "POST",
-                                         "Request Content-Type": "multipart/form-data",
+                                         "Request Content-Type": "text/csv",
+                                         # Dynamic property — sent as Authorization HTTP header:
                                          "Authorization": f"Bearer {auth_token}",
-                                         # Custom attributes as form fields
-                                         "Attributes to Send": "ingest\\..*",
+                                         # Regex: send X-Ingest-Source and X-Ingest-Filename
+                                         # FlowFile attributes as HTTP request headers:
+                                         "Attributes to Send": "X-Ingest-.*",
                                          "Send Message Body": "true",
                                          "Connection Timeout": "30 sec",
                                          "Read Timeout": "60 sec",
                                          "Response Body Ignored": "false",
                                      },
+                                     # No relationships auto-terminated here yet —
+                                     # set after connections are wired.
                                      "autoTerminatedRelationships": [],
                                  }}})
-    invoke_http_id = invoke_http["id"]
+    invoke_http_id = _require_id(invoke_http, "InvokeHTTP processor")
     print(f"  InvokeHTTP processor: {invoke_http_id}")
 
-    # 6. PutFile — failed files go to /data/nifi-failed.
+    # 7. PutFile — failed files go to /data/nifi-failed.
+    #    Receives: Failure (connection error), No Retry (4xx), Retry (5xx).
+    #    Its own success/failure relationships are auto-terminated since
+    #    the archived copy in nifi-failed is the final destination.
     put_file = _api(nifi_url, f"/nifi-api/process-groups/{pg_id}/processors",
                     method="POST", token=token,
                     body={"revision": {"version": 0},
@@ -207,10 +298,10 @@ def build_flow(nifi_url: str, token: str, backend_url: str, auth_token: str,
                                   },
                                   "autoTerminatedRelationships": ["success", "failure"],
                               }}})
-    put_file_id = put_file["id"]
+    put_file_id = _require_id(put_file, "PutFile processor")
     print(f"  PutFile (failure) processor: {put_file_id}")
 
-    # 7. Connect processors.
+    # 8. Connect processors.
     def connect(src_id: str, src_rel: str, dst_id: str) -> str:
         conn = _api(nifi_url, f"/nifi-api/process-groups/{pg_id}/connections",
                     method="POST", token=token,
@@ -220,26 +311,34 @@ def build_flow(nifi_url: str, token: str, backend_url: str, auth_token: str,
                               "destination": {"id": dst_id, "groupId": pg_id, "type": "PROCESSOR"},
                               "selectedRelationships": [src_rel],
                           }})
-        return conn["id"]
+        conn_id = _require_id(conn, f"connection {src_id}→{dst_id} [{src_rel}]")
+        return conn_id
 
     connect(get_file_id, "success", update_attr_id)
     connect(update_attr_id, "success", invoke_http_id)
-    connect(invoke_http_id, "Failure", put_file_id)
-    connect(invoke_http_id, "No Retry", put_file_id)
+    # All three failure relationships route to PutFile:
+    connect(invoke_http_id, "Failure", put_file_id)    # connection/timeout
+    connect(invoke_http_id, "No Retry", put_file_id)   # 4xx
+    connect(invoke_http_id, "Retry", put_file_id)      # 5xx — must not be auto-terminated
     print("  Connections created.")
 
-    # Auto-terminate success relationships on InvokeHTTP (2xx responses).
+    # 9. Auto-terminate only the success-path relationships on InvokeHTTP.
+    #    Response = 2xx HTTP response body FlowFile (logged, not needed downstream)
+    #    Original = original FlowFile copy produced on success
+    #    Do NOT auto-terminate Failure, No Retry, or Retry — those go to PutFile.
     _api(nifi_url, f"/nifi-api/processors/{invoke_http_id}",
          method="PUT", token=token,
          body={"revision": invoke_http["revision"],
                "component": {
                    "id": invoke_http_id,
-                   "config": {"autoTerminatedRelationships": ["Response", "Original", "Retry"]}}})
+                   "config": {"autoTerminatedRelationships": ["Response", "Original"]}}})
+    print("  Auto-terminate set for Response and Original.")
 
     print(f"\nFlow created in process group: {pg_id}")
-    print("Start the flow in the NiFi UI or via:")
-    print(f"  PUT /nifi-api/flow/process-groups/{pg_id} {{\"id\":\"{pg_id}\","
-          f"\"state\":\"RUNNING\"}}")
+    print("\nTo start the flow, run:")
+    print(f"  PUT {nifi_url}/nifi-api/flow/process-groups/{pg_id}")
+    print(f'  Body: {{"id":"{pg_id}","state":"RUNNING"}}')
+    print("\nOr start it from the NiFi UI.")
     return pg_id
 
 
@@ -271,6 +370,7 @@ def main() -> None:
         wait_for_nifi(args.nifi_url)
 
     print(f"Authenticating with NiFi at {args.nifi_url} …")
+    # Password is not echoed here; auth_token is never printed.
     token = _get_token(args.nifi_url, args.username, args.password)
 
     build_flow(

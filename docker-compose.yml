@@ -18,39 +18,39 @@ x-backend-env: &backend-env
 services:
   postgres:
     image: postgres:16-alpine
-    profiles: [core, all]
+    profiles: [ core, all ]
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-foodrescue}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-foodrescue}
       POSTGRES_DB: ${POSTGRES_DB:-foodrescue}
-    ports: ["${POSTGRES_PORT:-5433}:5432"]
-    volumes: [pgdata:/var/lib/postgresql/data]
+    ports: [ "${POSTGRES_PORT:-5433}:5432" ]
+    volumes: [ pgdata:/var/lib/postgresql/data ]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-foodrescue}"]
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-foodrescue}" ]
       interval: 5s
       timeout: 5s
       retries: 10
 
   mongo:
     image: mongo:7
-    profiles: [core, all]
-    ports: ["${MONGO_PORT:-27017}:27017"]
-    volumes: [mongodata:/data/db]
+    profiles: [ core, all ]
+    ports: [ "${MONGO_PORT:-27017}:27017" ]
+    volumes: [ mongodata:/data/db ]
     healthcheck:
-      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      test: [ "CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok" ]
       interval: 5s
       timeout: 10s
       retries: 10
 
   rabbitmq:
     image: rabbitmq:3.13-management
-    profiles: [core, all]
+    profiles: [ core, all ]
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
-    ports: ["5672:5672", "15672:15672"]
+    ports: [ "5672:5672", "15672:15672" ]
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      test: [ "CMD", "rabbitmq-diagnostics", "-q", "ping" ]
       interval: 10s
       timeout: 10s
       retries: 10
@@ -59,18 +59,18 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    profiles: [core, all]
+    profiles: [ core, all ]
     environment: *backend-env
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
-    ports: ["8000:8000"]
+    ports: [ "8000:8000" ]
     volumes:
       - ./data/inbox:/data/inbox
     depends_on:
-      postgres: {condition: service_healthy}
-      mongo: {condition: service_healthy}
-      rabbitmq: {condition: service_healthy}
+      postgres: { condition: service_healthy }
+      mongo: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      test: [ "CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/health')" ]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -79,33 +79,34 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    profiles: [core, all]
+    profiles: [ core, all ]
     environment: *backend-env
     command: python -m app.worker.consumer
     depends_on:
-      backend: {condition: service_healthy}
+      backend: { condition: service_healthy }
     restart: unless-stopped
 
   frontend:
     build:
       context: ./frontend
-    profiles: [core, all]
-    ports: ["5173:80"]
+    profiles: [ core, all ]
+    ports: [ "5173:80" ]
     depends_on:
-      backend: {condition: service_healthy}
+      backend: { condition: service_healthy }
 
   # ---- Pipeline services (profile: pipeline or all) ----
 
   nifi:
     image: apache/nifi:1.28.1
-    profiles: [pipeline, all]
+    profiles: [ pipeline, all ]
     # Single-user auth is required since NiFi 1.14.  Override NIFI_PASSWORD in .env for
     # any shared environment; never use the default in production.
     environment:
       SINGLE_USER_CREDENTIALS_USERNAME: ${NIFI_USER:-admin}
       SINGLE_USER_CREDENTIALS_PASSWORD: ${NIFI_PASSWORD:-nifi-local-dev-password-change-me}
       NIFI_WEB_HTTP_PORT: "8080"
-      NIFI_WEB_HTTPS_PORT: ""          # Disable HTTPS for local dev; re-enable for production.
+      NIFI_WEB_HTTP_HOST: "0.0.0.0"
+      NIFI_WEB_HTTPS_PORT: "" # Disable HTTPS for local dev; re-enable for production.
       NIFI_JVM_HEAP_INIT: 512m
       NIFI_JVM_HEAP_MAX: 1g
     ports:
@@ -116,18 +117,17 @@ services:
       - nifi_flowfile:/opt/nifi/nifi-current/flowfile_repository
       - nifi_content:/opt/nifi/nifi-current/content_repository
       - nifi_provenance:/opt/nifi/nifi-current/provenance_repository
-      - ./data/inbox:/data/inbox:ro       # NiFi reads CSVs from here (GetFile source)
-      - ./data/nifi-failed:/data/nifi-failed  # Failed files land here
-      - ./nifi:/nifi-config:ro            # Version-controlled flow config / scripts
+      - ./data/inbox:/data/inbox:rw # NiFi reads and removes CSVs (GetFile, Keep Source File=false)
+      - ./data/nifi-failed:/data/nifi-failed # Failed files land here
+      - ./nifi:/nifi-config:ro # Version-controlled flow config / scripts
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8080/nifi/ > /dev/null"]
+      test: [ "CMD-SHELL", "curl -sf http://localhost:8080/nifi/ > /dev/null" ]
       interval: 30s
       timeout: 10s
       retries: 15
       start_period: 120s
     depends_on:
-      backend: {condition: service_healthy}
-
+      backend: { condition: service_healthy }
   # airflow:       profile [pipeline, all]  - DAGs: delta snapshots, analytics refresh
   # elasticsearch: profile [search, all]    - donation/NGO search index
 
