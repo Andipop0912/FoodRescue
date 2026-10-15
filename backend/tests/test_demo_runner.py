@@ -48,3 +48,26 @@ def test_demo_endpoints_validate_and_reset(client, admin, session, published):
     assert client.post("/demo/reset", headers=admin).json() == {"ok": True}
     live = client.get("/admin/live", headers=admin).json()
     assert set(live) >= {"demo", "stats", "events", "pins", "rejected", "last_event_id"}
+
+
+def test_demo_start_preserves_data_by_default(client, admin, session, published, monkeypatch):
+    from datetime import timedelta
+    from app.models import Donation, Donor
+    from app.utils import utcnow
+
+    donor = session.query(Donor).first()
+    d = Donation(donor_id=donor.id, food_type="Preserved Food", category="packaged", quantity_kg=15.0,
+                 expiry_time=utcnow() + timedelta(hours=10), lat=19.03, lng=73.02, area="Nerul",
+                 source="manual", status="listed")
+    session.add(d)
+    session.commit()
+    did = d.id
+
+    monkeypatch.setattr(settings, "sim_direct_ingest", False)
+    r = client.post("/demo/start", headers=admin, json={})
+    assert r.status_code == 200
+    client.post("/demo/stop", headers=admin)
+
+    session.expire_all()
+    assert session.get(Donation, did) is not None, "Existing donation was wiped by default demo start"
+

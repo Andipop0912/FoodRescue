@@ -102,7 +102,7 @@ class DemoStartIn(BaseModel):
     duration_minutes: float = 10
     interval_seconds: float = 30
     speed: int = 1
-    reset: bool = True
+    reset: bool = False
     start_hour: int | None = Field(default=None, ge=0, le=23)  # force lunch/dinner intensity for demos
 
 

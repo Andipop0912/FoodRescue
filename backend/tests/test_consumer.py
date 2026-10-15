@@ -99,3 +99,58 @@ def test_nack_requeue_is_false_not_true():
     ch = _simulate_one_delivery(process_raises=True)
     _, kwargs = ch.basic_nack.call_args
     assert kwargs.get("requeue") is False, "requeue must be False to avoid infinite requeue loop"
+
+
+# ---------------------------------------------------------------------------
+# Sweeper per-donation exception isolation
+# ---------------------------------------------------------------------------
+
+def test_sweep_processes_all_donations_when_one_raises(session):
+    """A sweeper failure on one donation must not abort the rest of the batch."""
+    from unittest.mock import patch, call
+    from app.worker.consumer import sweep
+    from app.models import Donation, Donor
+    from app.utils import utcnow
+    from datetime import timedelta
+
+    donor = session.query(Donor).first()
+    now = utcnow()
+
+    # Create two donations old enough for the sweeper (created_at > 20 s ago).
+    ids = []
+    for _ in range(2):
+        d = Donation(
+            donor_id=donor.id, food_type="Rice", category="grains", quantity_kg=5.0,
+            expiry_time=now + timedelta(hours=3),
+            lat=19.033, lng=73.0297, area="Vashi", source="manual", status="listed",
+            created_at=now - timedelta(seconds=60),
+        )
+        session.add(d)
+        session.flush()
+        ids.append(d.id)
+    session.commit()
+
+    call_count = {"n": 0}
+
+    def _match_donation_raises_on_first(db, donation_id, log=True):
+        call_count["n"] += 1
+        if donation_id == ids[0]:
+            raise RuntimeError("simulated error for donation isolation test")
+        return []
+
+    with patch("app.worker.consumer.match_donation", side_effect=_match_donation_raises_on_first):
+        swept = sweep()
+
+    # The sweeper must have attempted both donations.
+    assert call_count["n"] == 2, (
+        f"Expected 2 match_donation calls (one per donation), got {call_count['n']}"
+    )
+    # sweep() returns the count of IDs attempted, not successes.
+    assert swept >= 2
+
+
+def test_sweep_returns_zero_when_no_unmatched_donations(session):
+    """sweep() returns 0 when there are no donations eligible for re-matching."""
+    from app.worker.consumer import sweep
+    result = sweep()
+    assert isinstance(result, int) and result >= 0

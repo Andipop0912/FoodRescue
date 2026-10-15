@@ -56,7 +56,7 @@ export default function Admin() {
   const { demo, stats, pins, rejected } = data
   const [speed, setSpeed] = useState(1)
   const [hour, setHour] = useState('')
-  const [reset, setReset] = useState(true)
+  const [reset, setReset] = useState(false)
   const [err, setErr] = useState('')
   const logRef = useRef(null)
 

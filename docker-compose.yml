@@ -8,6 +8,9 @@ x-backend-env: &backend-env
   MONGO_DB: foodrescue
   RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:-guest}@rabbitmq:5672/
   JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me-please-32-bytes-min}
+  # Activates the production JWT-secret guard in app/config.py.  Backend and worker
+  # containers will refuse to start unless JWT_SECRET is a strong, non-placeholder value.
+  FOODRESCUE_ENV: production
   INBOX_DIR: /data/inbox
   API_INTERNAL_URL: http://127.0.0.1:8000
   SIM_DIRECT_INGEST: ${SIM_DIRECT_INGEST:-true}

@@ -79,7 +79,6 @@ def test_websocket_requires_admin_token(client, donor, admin):
 
 def test_jwt_secret_validator_rejects_short_secret_in_production(monkeypatch):
     """A secret shorter than 32 bytes must raise ValueError in production mode."""
-    import os
     from pydantic import ValidationError
     from app.config import Settings
     monkeypatch.setenv("FOODRESCUE_ENV", "production")
@@ -96,15 +95,66 @@ def test_jwt_secret_validator_rejects_dev_placeholder_in_production(monkeypatch)
         Settings(jwt_secret=_DEV_SECRET, database_url="postgresql+psycopg2://u:p@prod-host/db")
 
 
-def test_jwt_secret_validator_allows_dev_placeholder_locally():
-    """The dev placeholder is accepted when the database URL contains 'localhost'."""
+def test_jwt_secret_validator_rejects_empty_in_production(monkeypatch):
+    """An empty jwt_secret must raise ValueError in production mode."""
+    from pydantic import ValidationError
+    from app.config import Settings
+    monkeypatch.setenv("FOODRESCUE_ENV", "production")
+    with pytest.raises((ValidationError, ValueError)):
+        Settings(jwt_secret="", database_url="postgresql+psycopg2://u:p@prod-host/db")
+
+
+# --- New regression tests: production env overrides localhost bypass ---
+
+def test_jwt_secret_validator_rejects_short_secret_production_localhost(monkeypatch):
+    """FOODRESCUE_ENV=production must reject weak secrets even with localhost in DATABASE_URL.
+    This is the regression test for the localhost-bypass bug that was present before this fix.
+    """
+    from pydantic import ValidationError
+    from app.config import Settings
+    monkeypatch.setenv("FOODRESCUE_ENV", "production")
+    with pytest.raises((ValidationError, ValueError)):
+        Settings(jwt_secret="tooshort", database_url="postgresql+psycopg2://u:p@localhost:5432/db")
+
+
+def test_jwt_secret_validator_rejects_placeholder_production_localhost(monkeypatch):
+    """FOODRESCUE_ENV=production must reject the dev placeholder even with localhost DATABASE_URL."""
+    from pydantic import ValidationError
     from app.config import Settings, _DEV_SECRET
+    monkeypatch.setenv("FOODRESCUE_ENV", "production")
+    with pytest.raises((ValidationError, ValueError)):
+        Settings(jwt_secret=_DEV_SECRET, database_url="postgresql+psycopg2://u:p@localhost:5432/db")
+
+
+def test_jwt_secret_validator_rejects_empty_production_localhost(monkeypatch):
+    """FOODRESCUE_ENV=production must reject an empty secret even with localhost DATABASE_URL."""
+    from pydantic import ValidationError
+    from app.config import Settings
+    monkeypatch.setenv("FOODRESCUE_ENV", "production")
+    with pytest.raises((ValidationError, ValueError)):
+        Settings(jwt_secret="", database_url="postgresql+psycopg2://u:p@localhost:5432/db")
+
+
+def test_jwt_secret_validator_accepts_strong_secret_production_localhost(monkeypatch):
+    """FOODRESCUE_ENV=production must accept a strong (>= 32 byte) non-placeholder secret."""
+    from app.config import Settings
+    monkeypatch.setenv("FOODRESCUE_ENV", "production")
+    strong = "a" * 32
+    s = Settings(jwt_secret=strong, database_url="postgresql+psycopg2://u:p@localhost:5432/db")
+    assert s.jwt_secret == strong
+
+
+def test_jwt_secret_validator_allows_dev_placeholder_locally():
+    """The dev placeholder is accepted when FOODRESCUE_ENV defaults to development."""
+    from app.config import Settings, _DEV_SECRET
+    # FOODRESCUE_ENV is not set, so defaults to development — localhost DB allowed
     s = Settings(jwt_secret=_DEV_SECRET, database_url="postgresql+psycopg2://u:p@localhost/db")
     assert s.jwt_secret == _DEV_SECRET
 
 
 def test_jwt_secret_validator_falls_back_to_dev_secret_when_empty_locally():
-    """An empty jwt_secret on localhost must silently default to the dev placeholder."""
+    """An empty jwt_secret in development must silently default to the dev placeholder."""
     from app.config import Settings, _DEV_SECRET
     s = Settings(jwt_secret="", database_url="postgresql+psycopg2://u:p@localhost/db")
     assert s.jwt_secret == _DEV_SECRET
+
