@@ -30,10 +30,28 @@ X-Ingest-Filename: <filename>     (set by UpdateAttribute → sent as HTTP heade
 
 Body: raw CSV text (UTF-8, RFC 4180, header row required)
 
+Authentication modes
+--------------------
+The script probes GET /nifi-api/access/config before attempting to log in.
+
+  supportsLogin=false  NiFi is in HTTP/unsecured mode.  --password is not
+                       required and must not be passed to /nifi-api/access/token
+                       (that endpoint returns HTTP 409 in this mode).  All NiFi
+                       API requests are made without an Authorization header.
+
+  supportsLogin=true   NiFi is secured (HTTPS + identity provider).  --password
+                       is required.  A Bearer token is obtained from
+                       /nifi-api/access/token and used for all API requests.
+
 Usage
 -----
-  # Wait for NiFi to start, then run once:
+  # Unsecured / HTTP mode (supportsLogin=false) — no --password needed:
   python nifi/deploy_flow.py --nifi-url http://localhost:8080 \\
+      --backend-url http://backend:8000 \\
+      --auth-token <ADMIN_JWT>
+
+  # Secured / HTTPS mode (supportsLogin=true):
+  python nifi/deploy_flow.py --nifi-url https://localhost:8443 \\
       --username admin --password <NIFI_PASSWORD> \\
       --backend-url http://backend:8000 \\
       --auth-token <ADMIN_JWT>
@@ -42,7 +60,6 @@ Usage
   docker exec -it foodrescue-nifi-1 \\
       python3 /nifi-config/deploy_flow.py \\
       --nifi-url http://localhost:8080 \\
-      --username admin --password <NIFI_PASSWORD> \\
       --backend-url http://backend:8000 \\
       --auth-token <ADMIN_JWT>
 
@@ -96,7 +113,32 @@ def _api(nifi_url: str, path: str, method: str = "GET",
         raise RuntimeError(f"NiFi API {method} {path} → HTTP {exc.code}: {detail}") from exc
 
 
+def _check_auth_mode(nifi_url: str) -> bool:
+    """Return True if NiFi supports username/password login, False if unsecured.
+
+    Calls GET /nifi-api/access/config and reads config.supportsLogin.
+
+    When supportsLogin is False, NiFi is running in HTTP/unsecured mode.
+    Calling POST /nifi-api/access/token in this mode returns HTTP 409 because
+    the token endpoint is disabled.  All API calls must be made without any
+    Authorization header.
+
+    When supportsLogin is True (HTTPS + identity provider configured), use
+    _get_token() to obtain a Bearer token and pass it to every _api() call.
+    """
+    try:
+        url = nifi_url.rstrip("/") + "/nifi-api/access/config"
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            config = json.loads(resp.read())
+        return bool(config.get("config", {}).get("supportsLogin", False))
+    except Exception as exc:
+        print(f"WARNING: could not read NiFi auth config ({exc}); assuming unsecured mode.")
+        return False
+
+
 def _get_token(nifi_url: str, username: str, password: str) -> str:
+    """Obtain a Bearer token via username/password.  Only call when supportsLogin=True."""
     url = nifi_url.rstrip("/") + "/nifi-api/access/token"
     data = f"username={username}&password={password}".encode()
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
@@ -105,6 +147,13 @@ def _get_token(nifi_url: str, username: str, password: str) -> str:
         with urllib.request.urlopen(req, timeout=15) as resp:
             return resp.read().decode().strip()
     except urllib.error.HTTPError as exc:
+        if exc.code == 409:
+            raise RuntimeError(
+                "NiFi login failed: HTTP 409 — the token endpoint is disabled.\n"
+                "This usually means NiFi is running in HTTP/unsecured mode "
+                "(supportsLogin=false).  Do not pass --password in this mode; "
+                "the script will detect it automatically."
+            ) from exc
         raise RuntimeError(f"NiFi login failed: HTTP {exc.code}") from exc
 
 
@@ -128,7 +177,7 @@ def wait_for_nifi(nifi_url: str, retries: int = 20, delay: float = 10.0) -> None
 FLOW_GROUP_NAME = "FoodRescue Inbox Ingestion"
 
 
-def _preflight_check(nifi_url: str, token: str, root_id: str) -> None:
+def _preflight_check(nifi_url: str, token: str | None, root_id: str) -> None:
     """Abort if a process group with the expected name already exists.
 
     This prevents duplicate flows being created on repeated script runs.
@@ -171,7 +220,7 @@ def _require_id(obj: dict, label: str) -> str:
     return obj_id
 
 
-def build_flow(nifi_url: str, token: str, backend_url: str, auth_token: str,
+def build_flow(nifi_url: str, token: str | None, backend_url: str, auth_token: str,
                source: str = "nifi-inbox",
                inbox_dir: str = "/data/inbox",
                failed_dir: str = "/data/nifi-failed") -> str:
@@ -359,9 +408,6 @@ def main() -> None:
     parser.add_argument("--wait", action="store_true", help="Wait for NiFi to start before deploying")
     args = parser.parse_args()
 
-    if not args.password:
-        print("ERROR: --password or NIFI_PASSWORD env var required", file=sys.stderr)
-        sys.exit(1)
     if not args.auth_token:
         print("ERROR: --auth-token or FOODRESCUE_AUTH_TOKEN env var required", file=sys.stderr)
         sys.exit(1)
@@ -369,13 +415,30 @@ def main() -> None:
     if args.wait:
         wait_for_nifi(args.nifi_url)
 
-    print(f"Authenticating with NiFi at {args.nifi_url} …")
-    # Password is not echoed here; auth_token is never printed.
-    token = _get_token(args.nifi_url, args.username, args.password)
+    # Detect NiFi authentication mode before attempting login.
+    supports_login = _check_auth_mode(args.nifi_url)
+
+    if supports_login:
+        # Secured mode (HTTPS + identity provider): username/password required.
+        if not args.password:
+            print(
+                "ERROR: NiFi requires authentication (supportsLogin=true) but "
+                "--password / NIFI_PASSWORD was not provided.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print(f"Authenticating with NiFi at {args.nifi_url} (secured mode) …")
+        # Password is not echoed here; auth_token is never printed.
+        nifi_token: str | None = _get_token(args.nifi_url, args.username, args.password)
+    else:
+        # Unsecured mode (HTTP, supportsLogin=false): no NiFi auth needed.
+        # Calling _get_token() in this mode returns HTTP 409.
+        print(f"NiFi at {args.nifi_url} is in unsecured mode (supportsLogin=false); skipping login.")
+        nifi_token = None
 
     build_flow(
         nifi_url=args.nifi_url,
-        token=token,
+        token=nifi_token,
         backend_url=args.backend_url,
         auth_token=args.auth_token,
         source=args.source,
