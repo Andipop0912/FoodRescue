@@ -119,3 +119,33 @@ def test_request_rows_allow_empty_category_but_not_past_needed_by():
 def test_empty_input():
     res = clean_records([], "donation", NOW)
     assert res.clean == [] and res.rejected == []
+
+
+def test_expiry_tz_offset_normalised_to_naive_utc():
+    # +05:30 wall-clock 20:30 = 15:00 UTC, 3 h ahead of NOW (12:00 UTC) → valid
+    res, rej = reasons([row(expiry_time="2026-10-14T20:30:00+05:30")])
+    assert rej == []
+    assert res.clean[0]["expiry_time"] == datetime(2026, 10, 14, 15, 0, 0)
+
+
+def test_expiry_alt_date_formats_accepted():
+    res, rej = reasons([row(expiry_time="14/10/2026 20:00")])
+    assert rej == [] and res.clean[0]["expiry_time"] == datetime(2026, 10, 14, 20, 0, 0)
+    res, rej = reasons([row(expiry_time="14-10-2026 20:00")])
+    assert rej == [] and res.clean[0]["expiry_time"] == datetime(2026, 10, 14, 20, 0, 0)
+
+
+def test_existing_keys_rejects_cross_batch_duplicate():
+    first = clean_records([row()], "donation", NOW)
+    assert len(first.clean) == 1
+    key = first.clean[0]["dedupe_key"]
+    second = clean_records([row()], "donation", NOW, existing_keys={key})
+    assert len(second.clean) == 0
+    assert second.rejected[0]["reason"] == "duplicate of an existing record"
+
+
+def test_clean_output_has_all_required_keys():
+    expected = {"row_number", "org_name", "food_type", "category", "quantity_kg",
+                "expiry_time", "lat", "lng", "area", "dedupe_key"}
+    res, _ = reasons([row()])
+    assert set(res.clean[0].keys()) == expected

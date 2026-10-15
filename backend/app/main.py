@@ -9,6 +9,7 @@ from app import db as dbmod
 from app.config import settings
 from app.routers import auth, demo, donations, ingest, ngo
 from app.seed import seed
+from app.services.mongo import ensure_indexes as _mongo_ensure_indexes
 from simulator.lifecycle import lifecycle_loop
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -19,6 +20,7 @@ logging.getLogger("pika").setLevel(logging.WARNING)
 async def lifespan(app: FastAPI):
     with dbmod.SessionLocal() as s:
         seed(s)
+    _mongo_ensure_indexes()
     task = asyncio.create_task(lifecycle_loop())
     yield
     task.cancel()

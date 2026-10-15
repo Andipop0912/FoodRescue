@@ -241,31 +241,28 @@ class TestJsonBody:
 # NiFi flow configuration assumptions (no live NiFi required)
 # ---------------------------------------------------------------------------
 
+def _load_deploy_flow():
+    import importlib.util, os
+    path = os.path.join(os.path.dirname(__file__), "..", "..", "nifi", "deploy_flow.py")
+    if not os.path.exists(path):
+        import pytest
+        pytest.skip("nifi/deploy_flow.py not present in this environment")
+    spec = importlib.util.spec_from_file_location("deploy_flow", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 class TestNiFiFlowConfig:
     def test_deploy_flow_constants(self):
         """Verify the deploy_flow.py constants match the router's allowed sources."""
-        import sys, os
-        nifi_dir = os.path.join(os.path.dirname(__file__), "..", "..", "nifi")
-        if nifi_dir not in sys.path:
-            sys.path.insert(0, nifi_dir)
-        import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "deploy_flow",
-            os.path.join(os.path.dirname(__file__), "..", "..", "nifi", "deploy_flow.py"),
-        )
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
+        mod = _load_deploy_flow()
         assert mod.FLOW_GROUP_NAME == "FoodRescue Inbox Ingestion"
 
     def test_deploy_flow_default_source_is_nifi_inbox(self):
         """Default source in build_flow must match the allowed source value in the router."""
-        import inspect, importlib.util, os
-        spec = importlib.util.spec_from_file_location(
-            "deploy_flow",
-            os.path.join(os.path.dirname(__file__), "..", "..", "nifi", "deploy_flow.py"),
-        )
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
+        import inspect
+        mod = _load_deploy_flow()
         sig = inspect.signature(mod.build_flow)
         assert sig.parameters["source"].default == "nifi-inbox"
 
