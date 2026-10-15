@@ -128,8 +128,35 @@ services:
       start_period: 120s
     depends_on:
       backend: { condition: service_healthy }
-  # airflow:       profile [pipeline, all]  - DAGs: delta snapshots, analytics refresh
   # elasticsearch: profile [search, all]    - donation/NGO search index
+
+  # ---- Airflow (profile: airflow or all) ----
+  # Runs airflow standalone (SequentialExecutor + SQLite metadata DB).
+  # Start with: docker compose --profile airflow up airflow -d
+  # UI: http://localhost:8081   login: admin / foodrescue123
+  airflow:
+    image: apache/airflow:2.9.3
+    profiles: [ airflow, all ]
+    command: standalone
+    user: "50000:0"
+    environment:
+      AIRFLOW_HOME: /opt/airflow
+      AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY:-foodrescue-airflow-dev-key-32-bytes!}
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_USER:-admin}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_PASSWORD:-foodrescue123}
+      # Credentials passed to the DAG (never hardcoded in the DAG file)
+      FOODRESCUE_DB_URL: postgresql://foodrescue:foodrescue@postgres:5432/foodrescue
+      FOODRESCUE_API_URL: http://backend:8000
+    ports:
+      - "${AIRFLOW_PORT:-8081}:8080"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags:ro
+      - airflow_home:/opt/airflow
+    restart: unless-stopped
 
 volumes:
   pgdata:
@@ -139,3 +166,4 @@ volumes:
   nifi_flowfile:
   nifi_content:
   nifi_provenance:
+  airflow_home:
