@@ -311,16 +311,22 @@ def build_flow(nifi_url: str, token: str | None, backend_url: str, auth_token: s
                                      "properties": {
                                          "Remote URL": f"{backend_url}/ingest/batch",
                                          "HTTP Method": "POST",
-                                         "Request Content-Type": "text/csv",
+                                         # "Content-Type" is the NiFi 1.x property name
+                                         # (not "Request Content-Type" which is NiFi 2.x):
+                                         "Content-Type": "text/csv",
                                          # Dynamic property — sent as Authorization HTTP header:
                                          "Authorization": f"Bearer {auth_token}",
                                          # Regex: send X-Ingest-Source and X-Ingest-Filename
                                          # FlowFile attributes as HTTP request headers:
                                          "Attributes to Send": "X-Ingest-.*",
-                                         "Send Message Body": "true",
+                                         # NiFi 1.x internal property names (kebab-case).
+                                         # Title-case variants would be treated as dynamic
+                                         # FlowFile attributes and sent as HTTP headers,
+                                         # which fails because HTTP headers cannot have spaces.
+                                         "send-message-body": "true",
+                                         "ignore-response-content": "false",
                                          "Connection Timeout": "30 sec",
                                          "Read Timeout": "60 sec",
-                                         "Response Body Ignored": "false",
                                      },
                                      # No relationships auto-terminated here yet —
                                      # set after connections are wired.
