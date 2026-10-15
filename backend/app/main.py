@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app import db as dbmod
 from app.config import settings
-from app.routers import auth, demo, donations, ingest, ngo
+from app.routers import auth, analytics, demo, donations, ingest, ngo
 from app.seed import seed
 from app.services.mongo import ensure_indexes as _mongo_ensure_indexes
 from simulator.lifecycle import lifecycle_loop
@@ -31,7 +31,7 @@ app = FastAPI(title="FoodRescue API", version="0.5.0", lifespan=lifespan,
 app.add_middleware(CORSMiddleware, allow_origins=[o.strip() for o in settings.cors_origins.split(",")],
                    allow_methods=["*"], allow_headers=["*"], allow_credentials=True)
 
-for r in (auth.router, donations.router, ngo.router, ingest.router, demo.router):
+for r in (auth.router, donations.router, ngo.router, ingest.router, demo.router, analytics.router):
     app.include_router(r)
 
 

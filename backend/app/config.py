@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     sim_direct_ingest: bool = True
     match_radius_km: float = 15.0
     cors_origins: str = "http://localhost:5173,http://localhost:5174"
+    elasticsearch_url: str = "http://localhost:9200"
 
     @model_validator(mode="after")
     def _validate_jwt_secret(self) -> "Settings":

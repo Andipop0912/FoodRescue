@@ -35,6 +35,7 @@ from airflow.operators.python import PythonOperator
 # ---------------------------------------------------------------------------
 _DB_DSN = os.environ["FOODRESCUE_DB_URL"]       # postgresql://user:pass@host/db
 _API_URL = os.environ.get("FOODRESCUE_API_URL", "http://backend:8000")
+_ES_URL = os.environ.get("FOODRESCUE_ES_URL", "http://elasticsearch:9200")
 
 _DEFAULT_ARGS = {
     "owner": "foodrescue",
@@ -295,6 +296,90 @@ def report_results(**ctx):
 
 
 # ---------------------------------------------------------------------------
+# Task 5 — DuckDB in-memory analytics
+# ---------------------------------------------------------------------------
+
+def run_duckdb_analytics(**_ctx):
+    """Load donations from PostgreSQL into DuckDB in-memory and compute analytics."""
+    import psycopg2
+    import duckdb
+
+    with psycopg2.connect(_DB_DSN) as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, status,
+                       COALESCE(category, 'uncategorised') AS category,
+                       quantity_kg::float, match_attempts
+                FROM donations
+            """)
+            don_rows = cur.fetchall()
+            cur.execute("SELECT score::float, status FROM matches")
+            match_rows = cur.fetchall()
+
+    if not don_rows:
+        logging.warning("DuckDB: no donations in database")
+        return {"engine": "duckdb", "total": 0}
+
+    con = duckdb.connect(":memory:")
+    con.execute("""
+        CREATE TABLE donations (
+            id INTEGER, status VARCHAR, category VARCHAR,
+            quantity_kg DOUBLE, match_attempts INTEGER
+        )
+    """)
+    con.executemany("INSERT INTO donations VALUES (?,?,?,?,?)", don_rows)
+
+    con.execute("CREATE TABLE matches (score DOUBLE, status VARCHAR)")
+    if match_rows:
+        con.executemany("INSERT INTO matches VALUES (?,?)", match_rows)
+
+    summary = con.execute("""
+        SELECT COUNT(*) total,
+               COUNT(*) FILTER (WHERE status IN ('matched','accepted','picked_up','delivered')) matched_above,
+               ROUND(AVG(quantity_kg)::numeric, 2) avg_kg,
+               ROUND(SUM(quantity_kg)::numeric, 1) total_kg,
+               ROUND(AVG(match_attempts)::numeric, 2) avg_attempts
+        FROM donations
+    """).fetchone()
+
+    cats = con.execute("""
+        SELECT category, COUNT(*) n,
+               ROUND(SUM(quantity_kg)::numeric, 1) total_kg,
+               COUNT(*) FILTER (WHERE status IN ('matched','accepted','picked_up','delivered')) matched_n
+        FROM donations GROUP BY category ORDER BY n DESC
+    """).fetchall()
+
+    score_row = con.execute("""
+        SELECT ROUND(AVG(score)::numeric, 4), COUNT(*)
+        FROM matches WHERE status = 'suggested'
+    """).fetchone()
+
+    con.close()
+
+    total = summary[0] or 0
+    matched = summary[1] or 0
+    match_rate = round(matched / total * 100, 1) if total else 0.0
+
+    result = {
+        "engine": "duckdb",
+        "total_donations": total,
+        "matched_or_above": matched,
+        "match_rate_pct": match_rate,
+        "avg_quantity_kg": float(summary[2] or 0),
+        "total_quantity_kg": float(summary[3] or 0),
+        "avg_match_attempts": float(summary[4] or 0),
+        "by_category": [
+            {"category": r[0], "n": r[1], "total_kg": float(r[2] or 0), "matched_n": r[3]}
+            for r in cats
+        ],
+        "avg_match_score": float(score_row[0] or 0),
+        "total_suggested_matches": score_row[1],
+    }
+    logging.info("DuckDB analytics: %s", result)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # DAG definition
 # ---------------------------------------------------------------------------
 
@@ -325,5 +410,10 @@ with DAG(
         task_id="report_results",
         python_callable=report_results,
     )
+    t5 = PythonOperator(
+        task_id="duckdb_analytics",
+        python_callable=run_duckdb_analytics,
+    )
 
     t1 >> t2 >> t3 >> t4
+    t3 >> t5

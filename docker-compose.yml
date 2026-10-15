@@ -14,6 +14,7 @@ x-backend-env: &backend-env
   INBOX_DIR: /data/inbox
   API_INTERNAL_URL: http://127.0.0.1:8000
   SIM_DIRECT_INGEST: ${SIM_DIRECT_INGEST:-true}
+  ELASTICSEARCH_URL: ${ELASTICSEARCH_URL:-http://elasticsearch:9200}
 
 services:
   postgres:
@@ -128,7 +129,27 @@ services:
       start_period: 120s
     depends_on:
       backend: { condition: service_healthy }
-  # elasticsearch: profile [search, all]    - donation/NGO search index
+  # ---- Search (profile: search or all) ----
+  # Single-node Elasticsearch 8 with security disabled for local dev.
+  # Start: docker compose --profile search up elasticsearch -d
+  # API:   http://localhost:9200
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.14.3
+    profiles: [ search, all ]
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "${ES_PORT:-9200}:9200"
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s" ]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
 
   # ---- Airflow (profile: airflow or all) ----
   # Runs airflow standalone (SequentialExecutor + SQLite metadata DB).
@@ -151,6 +172,8 @@ services:
       # Credentials passed to the DAG (never hardcoded in the DAG file)
       FOODRESCUE_DB_URL: postgresql://foodrescue:foodrescue@postgres:5432/foodrescue
       FOODRESCUE_API_URL: http://backend:8000
+      FOODRESCUE_ES_URL: http://elasticsearch:9200
+      _PIP_ADDITIONAL_REQUIREMENTS: duckdb>=1.0
     ports:
       - "${AIRFLOW_PORT:-8081}:8080"
     volumes:
@@ -166,4 +189,5 @@ volumes:
   nifi_flowfile:
   nifi_content:
   nifi_provenance:
+  esdata:
   airflow_home:
