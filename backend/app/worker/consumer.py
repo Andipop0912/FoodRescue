@@ -137,6 +137,7 @@ def sweep() -> int:
                 ok += 1
             except Exception:
                 log.exception("sweeper: error processing donation_id=%s; skipping", i)
+                db.rollback()  # reset aborted transaction so subsequent donations are not poisoned
     return len(ids)
 
 

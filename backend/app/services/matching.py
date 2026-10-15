@@ -115,7 +115,12 @@ def match_donation(db: Session, donation_id: int, now: datetime | None = None, l
     now = now or utcnow()
     # Lock the row for the duration of this transaction so concurrent workers wait
     # rather than racing to insert duplicate suggestions.
-    donation = db.scalar(select(Donation).where(Donation.id == donation_id).with_for_update())
+    # with_for_update(of=Donation): lock only the donations table row, not the
+    # eagerly-joined donors table.  Plain .with_for_update() raises
+    # "FeatureNotSupported: FOR UPDATE cannot be applied to the nullable side of
+    # an outer join" in PostgreSQL when the Donation.donor lazy="joined"
+    # relationship adds a LEFT OUTER JOIN to the query.
+    donation = db.scalar(select(Donation).where(Donation.id == donation_id).with_for_update(of=Donation))
     if donation is None or donation.status not in (S_LISTED, S_MATCHED):
         return []
     donation.match_attempts += 1

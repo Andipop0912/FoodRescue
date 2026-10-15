@@ -15,8 +15,8 @@ router = APIRouter(prefix="/donations", tags=["donations"])
 
 def serialize(db: Session, donations: list[Donation]) -> list[DonationOut]:
     ids = [d.id for d in donations]
-    counts = dict(db.execute(select(Match.donation_id, func.count(Match.id)).where(Match.donation_id.in_(ids))
-                             .group_by(Match.donation_id)).all()) if ids else {}
+    counts = dict(db.execute(select(Match.donation_id, func.count(Match.id)).where(
+        Match.donation_id.in_(ids), Match.status == "suggested").group_by(Match.donation_id)).all()) if ids else {}
     ngo_ids = {d.accepted_ngo_id for d in donations if d.accepted_ngo_id}
     ngos = {n.id: n.name for n in db.scalars(select(NGO).where(NGO.id.in_(ngo_ids)))} if ngo_ids else {}
     out = []
