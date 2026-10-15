@@ -1,6 +1,9 @@
-import { useState } from 'react'
+import { useId, useState } from 'react'
 import { api } from '../api.js'
-import { AREAS, CATEGORIES, Steps, fmtTime, label, timeLeft, usePolling } from '../components/bits.jsx'
+import {
+  AREAS, Alert, Badge, CATEGORIES, EmptyState, Loading, PageHeader, ScoreBar, Steps, TimeLeft, fmtTime, label, usePolling,
+} from '../components/bits.jsx'
+import { Icon } from '../components/icons.jsx'
 
 const localInput = (d) => {
   const p = (n) => String(n).padStart(2, '0')
@@ -10,6 +13,7 @@ const blank = () => ({ food_type: '', category: 'cooked_meals', quantity_kg: '',
   expiry: localInput(new Date(Date.now() + 4 * 3600e3)) })
 
 export default function Donor() {
+  const uid = useId()
   const [form, setForm] = useState(blank())
   const [msg, setMsg] = useState(null)
   const [busy, setBusy] = useState(false)
@@ -44,68 +48,147 @@ export default function Donor() {
   }
 
   return (
-    <div className="grid two">
-      <section className="card">
-        <h2>Donate surplus food</h2>
-        <form onSubmit={submit} className="form">
-          <label>What food?
-            <input value={form.food_type} onChange={set('food_type')} placeholder="e.g. Veg biryani" required minLength={2} />
-          </label>
-          <div className="row">
-            <label>Category
-              <select value={form.category} onChange={set('category')}>
-                {CATEGORIES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-              </select>
-            </label>
-            <label>Quantity (kg)
-              <input type="number" min="0.5" max="5000" step="0.5" value={form.quantity_kg} onChange={set('quantity_kg')} required />
-            </label>
-          </div>
-          <div className="row">
-            <label>Area
-              <select value={form.area} onChange={set('area')}>{AREAS.map((a) => <option key={a}>{a}</option>)}</select>
-            </label>
-            <label>Use before
-              <input type="datetime-local" value={form.expiry} onChange={set('expiry')} required />
-            </label>
-          </div>
-          {msg && <div className={`alert ${msg.ok ? 'ok' : 'error'}`} role="alert">{msg.text}</div>}
-          <button className="btn primary" disabled={busy}>{busy ? 'Listing…' : 'List donation'}</button>
-        </form>
-      </section>
+    <>
+      <PageHeader title="Donor dashboard" subtitle="List surplus food and follow each donation from match to delivery." />
 
-      <section className="card">
-        <h2>My donations {rows && <span className="muted">({rows.length})</span>}</h2>
-        {err && <div className="alert error">{err}</div>}
-        {rows && rows.length === 0 && <p className="muted">Nothing yet. List your first donation on the left.</p>}
-        <div className="list">
-          {(rows || []).map((d) => (
-            <div key={d.id} className="item">
-              <div className="item-head" onClick={() => toggle(d.id)}>
-                <div>
-                  <b>{d.food_type}</b> <span className="muted">· {d.quantity_kg} kg · {label(d.category)} · {d.area}</span>
-                  <div className="muted small">Use before {fmtTime(d.expiry_time)} ({timeLeft(d.expiry_time)})</div>
-                </div>
-                <Steps status={d.status} />
-              </div>
-              {d.accepted_ngo_name && <div className="small">✅ Accepted by <b>{d.accepted_ngo_name}</b></div>}
-              {d.status === 'listed' && <div className="small muted">Finding NGOs within 15 km…</div>}
-              {!d.accepted_ngo_name && d.match_count > 0 && <div className="small muted">{d.match_count} NGOs matched. Click to view</div>}
-              {open === d.id && (
-                <table className="mini">
-                  <thead><tr><th>#</th><th>NGO</th><th>Distance</th><th>Score</th><th>Status</th></tr></thead>
-                  <tbody>
-                    {matches.map((m) => (
-                      <tr key={m.id}><td>{m.rank}</td><td>{m.ngo_name}</td><td>{m.distance_km} km</td><td>{m.score.toFixed(2)}</td><td>{m.status}</td></tr>
-                    ))}
-                    {matches.length === 0 && <tr><td colSpan="5" className="muted">No matches yet</td></tr>}
-                  </tbody>
-                </table>
-              )}
+      <div className="grid-split">
+        <section className="card" aria-labelledby={`${uid}-donate`}>
+          <div className="card-header">
+            <div>
+              <h2 id={`${uid}-donate`} className="card-title">Donate surplus food</h2>
+              <p className="card-subtitle">NGOs within 15 km are ranked for it as soon as it is listed.</p>
             </div>
-          ))}
-        </div>
-      </section>
-    </div>
+          </div>
+          <form onSubmit={submit} className="form">
+            <div className="form-group">
+              <label className="form-label" htmlFor={`${uid}-food`}>What food?</label>
+              <input id={`${uid}-food`} className="input" value={form.food_type} onChange={set('food_type')}
+                placeholder="e.g. Veg biryani" required minLength={2} />
+            </div>
+            <div className="form-row">
+              <div className="form-group">
+                <label className="form-label" htmlFor={`${uid}-category`}>Category</label>
+                <select id={`${uid}-category`} className="select" value={form.category} onChange={set('category')}>
+                  {CATEGORIES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                </select>
+              </div>
+              <div className="form-group">
+                <label className="form-label" htmlFor={`${uid}-qty`}>Quantity (kg)</label>
+                <input id={`${uid}-qty`} className="input" type="number" inputMode="decimal" min="0.5" max="5000" step="0.5"
+                  value={form.quantity_kg} onChange={set('quantity_kg')} required />
+              </div>
+            </div>
+            <div className="form-row">
+              <div className="form-group">
+                <label className="form-label" htmlFor={`${uid}-area`}>Area</label>
+                <select id={`${uid}-area`} className="select" value={form.area} onChange={set('area')}>
+                  {AREAS.map((a) => <option key={a}>{a}</option>)}
+                </select>
+              </div>
+              <div className="form-group">
+                <label className="form-label" htmlFor={`${uid}-expiry`}>Use before</label>
+                <input id={`${uid}-expiry`} className="input" type="datetime-local" value={form.expiry}
+                  onChange={set('expiry')} required />
+              </div>
+            </div>
+            {msg && <Alert tone={msg.ok ? 'success' : 'error'} role="alert">{msg.text}</Alert>}
+            <button className="btn btn-primary btn-lg btn-block" disabled={busy} aria-busy={busy}>
+              {busy ? 'Listing…' : 'List donation'}
+            </button>
+          </form>
+        </section>
+
+        <section className="card" aria-labelledby={`${uid}-mine`}>
+          <div className="card-header">
+            <div>
+              <h2 id={`${uid}-mine`} className="card-title">
+                My donations {rows && <span className="count">{rows.length}</span>}
+              </h2>
+              <p className="card-subtitle">Select a donation to see the NGOs it was matched with.</p>
+            </div>
+          </div>
+          {err && <Alert tone="error">{err}</Alert>}
+          {!rows && !err && <Loading label="Loading your donations…" />}
+          {rows && rows.length === 0 && (
+            <EmptyState icon="package" title="No donations yet">List your first donation using the form.</EmptyState>
+          )}
+          {rows && rows.length > 0 && (
+            <ul className="list">
+              {rows.map((d) => {
+                const isOpen = open === d.id
+                const finished = d.status === 'delivered' || d.status === 'expired'
+                return (
+                  <li key={d.id} className={`item${isOpen ? ' is-open' : ''}`}>
+                    <button type="button" className="item-head item-toggle" onClick={() => toggle(d.id)}
+                      aria-expanded={isOpen} aria-controls={`${uid}-matches-${d.id}`}>
+                      <span className="item-main">
+                        <span className="item-title">{d.food_type}</span>
+                        <span className="item-meta">{d.quantity_kg} kg · {label(d.category)} · {d.area}</span>
+                        <span className="item-sub">
+                          Use before {fmtTime(d.expiry_time)}
+                          <TimeLeft iso={d.expiry_time} quiet={finished} />
+                        </span>
+                        {d.accepted_ngo_name && (
+                          <span className="item-note is-success">
+                            <Icon name="check-circle" size={16} />
+                            <span>Accepted by <b>{d.accepted_ngo_name}</b></span>
+                          </span>
+                        )}
+                        {d.status === 'listed' && (
+                          <span className="item-note">
+                            <span className="spinner spinner-sm" aria-hidden="true" />
+                            Finding NGOs within 15 km…
+                          </span>
+                        )}
+                        {!d.accepted_ngo_name && d.match_count > 0 && (
+                          <span className="item-note">
+                            {d.match_count} NGOs matched · {isOpen ? 'Hide' : 'View'} ranking
+                          </span>
+                        )}
+                      </span>
+                      <span className="item-side">
+                        <Steps status={d.status} />
+                        <Icon name="chevron-down" size={18} className="chevron" />
+                      </span>
+                    </button>
+                    {isOpen && (
+                      <div className="item-detail" id={`${uid}-matches-${d.id}`}>
+                        <div className="table-wrap">
+                          <table className="table table-compact table-medium">
+                            <thead>
+                              <tr>
+                                <th scope="col" className="num">#</th>
+                                <th scope="col">NGO</th>
+                                <th scope="col" className="num">Distance</th>
+                                <th scope="col">Score</th>
+                                <th scope="col">Status</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {matches.map((m) => (
+                                <tr key={m.id}>
+                                  <td className="num">{m.rank}</td>
+                                  <td>{m.ngo_name}</td>
+                                  <td className="num">{m.distance_km} km</td>
+                                  <td><ScoreBar m={m} /></td>
+                                  <td><Badge status={m.status} /></td>
+                                </tr>
+                              ))}
+                              {matches.length === 0 && (
+                                <tr><td colSpan="5" className="table-empty">No matches yet</td></tr>
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </li>
+                )
+              })}
+            </ul>
+          )}
+        </section>
+      </div>
+    </>
   )
 }

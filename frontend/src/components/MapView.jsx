@@ -1,26 +1,36 @@
 import { CircleMarker, MapContainer, Popup, TileLayer } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
-import { STATUSES, STATUS_COLOR, label } from './bits.jsx'
+import { Badge, STATUSES, STATUS_COLOR, humanize, label } from './bits.jsx'
+
+/** Flow statuses are filled pins shaded light to dark; expired is a hollow red ring so it
+ *  never depends on telling red from green. */
+const pinStyle = (status) => (status === 'expired'
+  ? { color: STATUS_COLOR.expired, weight: 2.5, fillColor: '#ffffff', fillOpacity: 0.9 }
+  : { color: '#ffffff', weight: 1.5, fillColor: STATUS_COLOR[status] || '#5a6b62', fillOpacity: 0.9 })
 
 export default function MapView({ pins }) {
   return (
-    <div>
+    <div className="map-wrap">
       <MapContainer center={[19.06, 73.02]} zoom={12} scrollWheelZoom className="map">
         <TileLayer attribution="&copy; OpenStreetMap contributors" url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
         {pins.map((p) => (
-          <CircleMarker key={p.id} center={[p.lat, p.lng]} radius={Math.min(10, 4 + p.kg / 10)}
-            pathOptions={{ color: '#fff', weight: 1, fillColor: STATUS_COLOR[p.status] || '#666', fillOpacity: 0.85 }}>
+          <CircleMarker key={p.id} center={[p.lat, p.lng]} radius={Math.min(10, 4 + p.kg / 10)} pathOptions={pinStyle(p.status)}>
             <Popup>
-              <b>{p.food}</b><br />{p.kg} kg · {label(p.category)}<br />{p.area} · <i>{label(p.status)}</i>
+              <div className="map-popup">
+                <strong className="map-popup-title">{p.food}</strong>
+                <span>{p.kg} kg · {label(p.category)}</span>
+                <span className="muted">{p.area}</span>
+                <Badge status={p.status} />
+              </div>
             </Popup>
           </CircleMarker>
         ))}
       </MapContainer>
-      <div className="legend">
+      <ul className="legend" aria-label="Map legend">
         {[...STATUSES, 'expired'].map((s) => (
-          <span key={s}><i style={{ background: STATUS_COLOR[s] }} />{label(s)}</span>
+          <li key={s}><span className={`dot s-${s}`} aria-hidden="true" />{humanize(s)}</li>
         ))}
-      </div>
+      </ul>
     </div>
   )
 }

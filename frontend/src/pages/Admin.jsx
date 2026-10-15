@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, loadAuth, wsUrl } from '../api.js'
 import MapView from '../components/MapView.jsx'
-import { STATUSES, STATUS_COLOR, label } from '../components/bits.jsx'
+import { Alert, Badge, PageHeader, STATUSES, humanize, label } from '../components/bits.jsx'
+import { Icon } from '../components/icons.jsx'
 
 const EMPTY = {
   demo: { state: 'idle', running: false, speed: 1, batch_no: 0, total_batches: 20, next_batch_in: 0 },
@@ -43,11 +44,23 @@ function useLive() {
   return { data, events, mode }
 }
 
+const LIVE_TEXT = { websocket: 'Live (WebSocket)', polling: 'Polling fallback', connecting: 'Connecting…' }
+
+const LiveIndicator = ({ mode }) => (
+  <span className={`live-indicator live-${mode}`} role="status">
+    <span className="dot" aria-hidden="true" />
+    {LIVE_TEXT[mode] || mode}
+  </span>
+)
+
 const Counter = ({ title, value, hint, tone }) => (
-  <div className={`counter ${tone || ''}`}>
-    <div className="cval">{typeof value === 'number' ? value.toLocaleString('en-IN') : value}</div>
-    <div className="clabel">{title}</div>
-    {hint && <div className="chint">{hint}</div>}
+  <div className={`stat${tone ? ` stat-${tone}` : ''}`}>
+    <div className="stat-label">
+      {tone && <span className="dot" aria-hidden="true" />}
+      {title}
+    </div>
+    <div className="stat-value">{typeof value === 'number' ? value.toLocaleString('en-IN') : value}</div>
+    {hint && <div className="stat-hint">{hint}</div>}
   </div>
 )
 
@@ -56,7 +69,7 @@ export default function Admin() {
   const { demo, stats, pins, rejected } = data
   const [speed, setSpeed] = useState(1)
   const [hour, setHour] = useState('')
-  const [reset, setReset] = useState(false)
+  const [reset, setReset] = useState(true)
   const [err, setErr] = useState('')
   const logRef = useRef(null)
 
@@ -71,48 +84,75 @@ export default function Admin() {
 
   const pct = demo.total_batches ? Math.round((demo.batch_no / demo.total_batches) * 100) : 0
   const by = stats.donations_by_status || {}
+  const flow = [...STATUSES, 'expired']
+  const tracked = flow.reduce((n, s) => n + (by[s] || 0), 0)
+  const [stateLabel, stateTone] = demo.running ? ['Running', 'success']
+    : demo.state === 'finished' ? ['Finished', 'neutral']
+      : demo.state === 'stopped' ? ['Stopped', 'warning'] : ['Ready', 'neutral']
 
   return (
     <>
-      <section className="card demo-bar">
+      <PageHeader title="Admin dashboard" subtitle="Run the live demo and watch donations move from ingestion to delivery."
+        actions={<LiveIndicator mode={mode} />} />
+
+      <section className="card demo-card" aria-labelledby="demo-title">
         <div className="demo-main">
-          <div>
-            <h2>Live Demo</h2>
-            <div className="muted small">
+          <div className="demo-heading">
+            <div className="demo-title">
+              <h2 id="demo-title">Live demo</h2>
+              <Badge tone={stateTone} className={demo.running ? 'is-live' : ''}>{stateLabel}</Badge>
+            </div>
+            <p className="muted small">
               {demo.running
                 ? `Batch ${demo.batch_no}/${demo.total_batches} · next in ${Math.ceil(demo.next_batch_in)}s · ${demo.speed}x`
                 : demo.state === 'finished' ? 'Finished: all batches sent'
                   : demo.state === 'stopped' ? 'Stopped' : 'Ready: 10 minutes, one batch every 30 s (20 batches)'}
-            </div>
+            </p>
           </div>
           <div className="controls">
-            <div className="seg" role="group" aria-label="Speed">
+            <div className="segmented" role="group" aria-label="Speed">
               {[1, 2, 5].map((s) => (
-                <button key={s} className={speed === s ? 'on' : ''} onClick={() => changeSpeed(s)}>{s}x</button>
+                <button key={s} type="button" aria-pressed={speed === s} onClick={() => changeSpeed(s)}>{s}x</button>
               ))}
             </div>
             {!demo.running && (
-              <select value={hour} onChange={(e) => setHour(e.target.value)} title="Surplus volume follows the time of day">
+              <select className="select select-sm" value={hour} onChange={(e) => setHour(e.target.value)}
+                title="Surplus volume follows the time of day" aria-label="Time of day">
                 <option value="">Real clock</option><option value="13">Lunch rush</option><option value="20">Dinner rush</option><option value="4">Quiet night</option>
               </select>
             )}
             {demo.running
-              ? <button className="btn danger" onClick={stop}>■ Stop</button>
-              : <button className="btn primary" onClick={start}>▶ Start Live Demo</button>}
+              ? <button type="button" className="btn btn-danger" onClick={stop}><Icon name="stop" size={16} />Stop</button>
+              : <button type="button" className="btn btn-primary" onClick={start}><Icon name="play" size={16} />Start Live Demo</button>}
           </div>
         </div>
-        <div className="progress"><i style={{ width: `${pct}%` }} /></div>
-        <div className="demo-foot small muted">
-          <label><input type="checkbox" checked={reset} onChange={(e) => setReset(e.target.checked)} disabled={demo.running} /> clear previous data on start</label>
-          <span>CSV → <code>data/inbox/</code> {demo.last_file && <>· last: <code>{demo.last_file}</code></>}</span>
-          <span>direct ingest ok {demo.direct_ok ?? 0} · fallback {demo.fallbacks ?? 0}</span>
-          <span className={`live ${mode}`}>● {mode === 'websocket' ? 'live (WebSocket)' : mode}</span>
-          {!demo.running && <button className="link" onClick={wipe}>reset data</button>}
+        <div className="progress-row">
+          <div className="progress" role="progressbar" aria-label="Batches sent" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct}>
+            <span className="progress-fill" style={{ width: `${pct}%` }} />
+          </div>
+          <span className="progress-pct" aria-hidden="true">{pct}%</span>
         </div>
-        {err && <div className="alert error" role="alert">{err}</div>}
+        <div className="demo-foot">
+          <label className="checkbox">
+            <input type="checkbox" checked={reset} onChange={(e) => setReset(e.target.checked)} disabled={demo.running} />
+            <span>Clear previous data on start</span>
+          </label>
+          <span className="foot-item">
+            <Icon name="file" size={14} />
+            CSV → <code>data/inbox/</code> {demo.last_file && <>· last: <code>{demo.last_file}</code></>}
+          </span>
+          <span className="foot-item">Direct ingest ok <b>{demo.direct_ok ?? 0}</b> · fallback <b>{demo.fallbacks ?? 0}</b></span>
+          {!demo.running && (
+            <button type="button" className="btn-link is-danger" onClick={wipe}>
+              <Icon name="rotate-ccw" size={14} />
+              Reset data
+            </button>
+          )}
+        </div>
+        {err && <Alert tone="error" role="alert">{err}</Alert>}
       </section>
 
-      <section className="counters">
+      <section className="stats-grid" aria-label="Pipeline counters">
         <Counter title="Batches" value={stats.batches} hint={`${stats.total_donations} donations`} />
         <Counter title="Accepted rows" value={stats.accepted_rows} tone="good" />
         <Counter title="Rejected rows" value={stats.rejected_rows} tone="bad" />
@@ -121,43 +161,87 @@ export default function Admin() {
         <Counter title="Meals" value={stats.meals} hint="kg ÷ 0.4" tone="good" />
       </section>
 
-      <section className="pipeline card">
-        {[...STATUSES, 'expired'].map((s) => (
-          <div key={s}><i style={{ background: STATUS_COLOR[s] }} /><b>{by[s] || 0}</b> {label(s)}</div>
-        ))}
+      <section className="card" aria-labelledby="status-title">
+        <div className="card-header">
+          <div>
+            <h2 id="status-title" className="card-title">Donations by status</h2>
+            <p className="card-subtitle">From listing to delivery. Expired donations were not collected in time.</p>
+          </div>
+          <span className="muted small">{tracked.toLocaleString('en-IN')} tracked</span>
+        </div>
+        <div className={`status-bar${tracked ? '' : ' is-empty'}`} aria-hidden="true">
+          {flow.filter((s) => by[s]).map((s) => (
+            <span key={s} className={`status-seg s-${s}`} style={{ flexGrow: by[s] }} title={`${humanize(s)}: ${by[s]}`} />
+          ))}
+        </div>
+        <ul className="status-legend">
+          {flow.map((s) => (
+            <li key={s}>
+              <span className="status-count">{(by[s] || 0).toLocaleString('en-IN')}</span>
+              <span className="status-name"><span className={`dot s-${s}`} aria-hidden="true" />{humanize(s)}</span>
+            </li>
+          ))}
+        </ul>
       </section>
 
-      <div className="grid two">
-        <section className="card">
-          <h2>Donation map</h2>
+      <div className="grid-2 equal">
+        <section className="card" aria-labelledby="map-title">
+          <div className="card-header">
+            <div>
+              <h2 id="map-title" className="card-title">Donation map</h2>
+              <p className="card-subtitle">Pins are sized by quantity and shaded by status.</p>
+            </div>
+          </div>
           <MapView pins={pins} />
         </section>
-        <section className="card">
-          <h2>Live event log</h2>
-          <div className="log" ref={logRef}>
-            {events.length === 0 && <div className="muted">Waiting for events. Press “Start Live Demo”.</div>}
+        <section className="card log-card" aria-labelledby="log-title">
+          <div className="card-header">
+            <div>
+              <h2 id="log-title" className="card-title">Live event log</h2>
+              <p className="card-subtitle">Ingestion, matching and delivery events as they happen.</p>
+            </div>
+          </div>
+          <div className="log" ref={logRef} tabIndex={0} role="region" aria-label="Live event log">
+            {events.length === 0 && <div className="log-empty">Waiting for events. Press “Start Live Demo”.</div>}
             {events.map((e) => (
               <div key={e.id} className={`ev ${e.kind}`}>
-                <time>{new Date(e.ts).toLocaleTimeString('en-IN')}</time>
-                <span className="tag">{e.kind}</span>
-                <span>{e.message}</span>
+                <time dateTime={e.ts}>{new Date(e.ts).toLocaleTimeString('en-IN')}</time>
+                <span className="tag">{label(e.kind)}</span>
+                <span className="ev-msg">{e.message}</span>
               </div>
             ))}
           </div>
         </section>
       </div>
 
-      <section className="card">
-        <h2>Rejected rows <span className="muted">(latest {rejected.length})</span></h2>
-        <div className="tablewrap">
-          <table>
-            <thead><tr><th>Batch</th><th>Row</th><th>Type</th><th>Reason</th><th>Raw data</th></tr></thead>
+      <section className="card" aria-labelledby="rejected-title">
+        <div className="card-header">
+          <div>
+            <h2 id="rejected-title" className="card-title">
+              Rejected rows <span className="count">{rejected.length}</span>
+            </h2>
+            <p className="card-subtitle">The latest rows the cleaning step rejected, with the reason.</p>
+          </div>
+        </div>
+        <div className="table-wrap table-scroll" tabIndex={0} role="region" aria-label="Rejected rows">
+          <table className="table table-wide">
+            <thead>
+              <tr>
+                <th scope="col">Batch</th>
+                <th scope="col" className="num">Row</th>
+                <th scope="col">Type</th>
+                <th scope="col">Reason</th>
+                <th scope="col">Raw data</th>
+              </tr>
+            </thead>
             <tbody>
-              {rejected.length === 0 && <tr><td colSpan="5" className="muted">No rejected rows yet</td></tr>}
+              {rejected.length === 0 && <tr><td colSpan="5" className="table-empty">No rejected rows yet</td></tr>}
               {rejected.map((r) => (
                 <tr key={r.id}>
-                  <td>#{r.batch_id}</td><td>{r.row_number}</td><td>{r.type}</td>
-                  <td><span className="reason">{r.reason}</span></td>
+                  <td>#{r.batch_id}</td>
+                  <td className="num">{r.row_number}</td>
+                  <td><Badge tone="outline">{humanize(r.type)}</Badge></td>
+                  <td><Badge tone="error" icon="alert-circle" className="badge-wrap">{r.reason}</Badge></td>
                   <td className="raw">{[r.raw.org_name, r.raw.food_type, r.raw.category, r.raw.quantity_kg && `${r.raw.quantity_kg}kg`].filter(Boolean).join(' · ')}</td>
                 </tr>
               ))}
