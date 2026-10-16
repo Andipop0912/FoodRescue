@@ -1,13 +1,32 @@
+# Secrets and environment
 .env
+*.pem
+*.key
+
+# Python
 __pycache__/
 *.pyc
+*.pyo
 .pytest_cache/
+.venv/
+
+# Node
 node_modules/
 dist/
+
+# Generated / runtime data
 data/inbox/*.csv
-# Delta Lake analytical tables (generated data; not source code)
+backend/data/
+# Delta Lake analytical tables
 data/delta/
-# NiFi failed-file landing zone (runtime artifacts)
+# NiFi failed-file landing zone
 data/nifi-failed/
+
+# Logs and temp
 screenshots/
-.venv/
+*.log
+*.sqlite
+*.db
+
+# Claude worktrees (agent scratch space)
+.claude/worktrees/
